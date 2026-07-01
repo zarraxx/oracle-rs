@@ -218,6 +218,9 @@ pub mod statement_cache;
 pub mod transport;
 pub mod types;
 
+#[doc(hidden)]
+pub mod ffi;
+
 // Re-export commonly used types
 pub use batch::{BatchBinds, BatchBuilder, BatchError, BatchOptions, BatchResult};
 pub use capabilities::Capabilities;

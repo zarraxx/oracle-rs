@@ -17,6 +17,9 @@ exclude = [
     "tests/",
 ]
 
+[lib]
+crate-type = ["lib", "staticlib"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
