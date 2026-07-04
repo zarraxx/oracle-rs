@@ -7,7 +7,9 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::buffer::WriteBuffer;
 use crate::capabilities::Capabilities;
-use crate::constants::{FetchOrientation, FunctionCode, MessageType, PacketType, PACKET_HEADER_SIZE};
+use crate::constants::{
+    data_flags, FetchOrientation, FunctionCode, MessageType, PacketType, PACKET_HEADER_SIZE,
+};
 use crate::error::Result;
 
 /// Fetch message to retrieve rows from a cursor
@@ -82,7 +84,7 @@ impl FetchMessage {
         packet.put_u16(0); // Header checksum
 
         // Data flags (2 bytes)
-        packet.put_u16(0);
+        packet.put_u16(data_flags::END_OF_REQUEST);
 
         // Payload
         packet.extend_from_slice(&payload);
@@ -123,9 +125,11 @@ mod tests {
         assert!(packet.len() > PACKET_HEADER_SIZE);
         assert_eq!(packet[4], PacketType::Data as u8);
 
-        // Check data flags are present
-        assert_eq!(packet[8], 0);
-        assert_eq!(packet[9], 0);
+        // Check request boundary flag is set on the final packet
+        assert_eq!(
+            u16::from_be_bytes([packet[8], packet[9]]),
+            data_flags::END_OF_REQUEST
+        );
 
         // Check function type (byte 10) is Function (3)
         assert_eq!(packet[10], MessageType::Function as u8);

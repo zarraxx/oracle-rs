@@ -35,7 +35,7 @@ use bytes::Bytes;
 
 use crate::buffer::{ReadBuffer, WriteBuffer};
 use crate::capabilities::{Capabilities, DRIVER_NAME};
-use crate::constants::{MessageType, PacketType, PACKET_HEADER_SIZE};
+use crate::constants::{data_flags, MessageType, PacketType, PACKET_HEADER_SIZE};
 use crate::error::{Error, Result};
 use crate::packet::PacketHeader;
 
@@ -66,19 +66,8 @@ impl ProtocolMessage {
         }
     }
 
-    /// Build the Protocol request packet
-    ///
-    /// # Arguments
-    /// * `large_sdu` - Whether to use large SDU format (4-byte length) for the packet header
-    pub fn build_request(&self, large_sdu: bool) -> Result<Bytes> {
-        let mut buf = WriteBuffer::with_capacity(128);
-
-        // Reserve space for packet header
-        buf.write_zeros(PACKET_HEADER_SIZE)?;
-
-        // Data flags (2 bytes)
-        buf.write_u16_be(0)?;
-
+    /// Encode the Protocol message payload without packet framing.
+    pub(crate) fn encode(&self, buf: &mut WriteBuffer) -> Result<()> {
         // Message type
         buf.write_u8(MessageType::Protocol as u8)?;
 
@@ -91,6 +80,24 @@ impl ProtocolMessage {
         // Driver name (null-terminated)
         buf.write_bytes(DRIVER_NAME.as_bytes())?;
         buf.write_u8(0)?;
+
+        Ok(())
+    }
+
+    /// Build the Protocol request packet
+    ///
+    /// # Arguments
+    /// * `large_sdu` - Whether to use large SDU format (4-byte length) for the packet header
+    pub fn build_request(&self, large_sdu: bool) -> Result<Bytes> {
+        let mut buf = WriteBuffer::with_capacity(128);
+
+        // Reserve space for packet header
+        buf.write_zeros(PACKET_HEADER_SIZE)?;
+
+        // Data flags (2 bytes)
+        buf.write_u16_be(data_flags::END_OF_REQUEST)?;
+
+        self.encode(&mut buf)?;
 
         // Calculate total length and write header
         let total_len = buf.len() as u32;
@@ -112,6 +119,15 @@ impl ProtocolMessage {
         // Skip data flags (2 bytes)
         buf.skip(2)?;
 
+        self.parse_message(&mut buf, caps)
+    }
+
+    /// Parse a Protocol message from a TTC buffer positioned at the message type.
+    pub(crate) fn parse_message(
+        &mut self,
+        buf: &mut ReadBuffer,
+        caps: &mut Capabilities,
+    ) -> Result<()> {
         // Read message type
         let msg_type = buf.read_u8()?;
         if msg_type != MessageType::Protocol as u8 {
@@ -121,6 +137,10 @@ impl ProtocolMessage {
             });
         }
 
+        self.parse_body(buf, caps)
+    }
+
+    fn parse_body(&mut self, buf: &mut ReadBuffer, caps: &mut Capabilities) -> Result<()> {
         // Server version
         self.server_version = buf.read_u8()?;
 
@@ -128,7 +148,7 @@ impl ProtocolMessage {
         buf.skip(1)?;
 
         // Read server banner (null-terminated)
-        self.server_banner = Some(Self::read_null_terminated_string(&mut buf)?);
+        self.server_banner = Some(Self::read_null_terminated_string(buf)?);
 
         // Character set ID (little-endian)
         caps.charset_id = buf.read_u16_le()?;
@@ -262,10 +282,7 @@ mod tests {
         assert!(result.is_ok());
 
         assert_eq!(msg.server_version, 6);
-        assert_eq!(
-            msg.server_banner.as_deref(),
-            Some("Oracle Database 19c")
-        );
+        assert_eq!(msg.server_banner.as_deref(), Some("Oracle Database 19c"));
         assert_eq!(caps.charset_id, 873);
     }
 

@@ -5,7 +5,10 @@
 
 use crate::buffer::WriteBuffer;
 use crate::capabilities::Capabilities;
-use crate::constants::{charset, lob_duration, lob_op, FunctionCode, MessageType, OracleType, PacketType, PACKET_HEADER_SIZE};
+use crate::constants::{
+    charset, data_flags, lob_duration, lob_op, FunctionCode, MessageType, OracleType, PacketType,
+    PACKET_HEADER_SIZE,
+};
 use crate::error::Result;
 use crate::types::LobLocator;
 use bytes::Bytes;
@@ -260,7 +263,7 @@ impl<'a> LobOpMessage<'a> {
         packet.write_u16_be(0)?; // Header checksum
 
         // Data flags
-        packet.write_u16_be(0)?;
+        packet.write_u16_be(data_flags::END_OF_REQUEST)?;
 
         // Message payload
         packet.write_bytes(&message)?;

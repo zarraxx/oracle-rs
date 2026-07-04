@@ -1,0 +1,1004 @@
+
+SQL*Plus: Release 19.0.0.0.0 - Production on Sat Jul 4 17:24:21 2026
+Version 19.31.0.0.0
+
+Copyright (c) 1982, 2026, Oracle.  All rights reserved.
+
+Last Successful login time: Sat Jul 04 2026 17:01:40 +08:00
+
+Connected to:
+Oracle AI Database 26ai Free Release 23.26.0.0.0 - Develop, Learn, and Run for Free
+Version 23.26.0.0.0
+
+SQL> SET FEEDBACK ON
+SQL> SET SERVEROUTPUT ON
+SQL> SET LONG 1000000
+SQL> SET LONGCHUNKSIZE 32767
+SQL> SET LINESIZE 200
+SQL> SET PAGESIZE 100
+SQL> WHENEVER SQLERROR CONTINUE
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 0. Environment
+0. Environment
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> SELECT USER FROM dual;
+
+USER
+--------------------------------------------------------------------------------------------------------------------------------
+SCOTT
+
+1 row selected.
+
+SQL> SELECT * FROM v$version WHERE ROWNUM = 1;
+
+BANNER
+---------------------------------------------------------------------------------------------------------------------------------
+BANNER_FULL
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+BANNER_LEGACY															      CON_ID
+--------------------------------------------------------------------------------------------------------------------------------- ----------
+Oracle AI Database 26ai Free Release 23.26.0.0.0 - Develop, Learn, and Run for Free
+Oracle AI Database 26ai Free Release 23.26.0.0.0 - Develop, Learn, and Run for Free
+Version 23.26.0.0.0
+Oracle AI Database 26ai Free Release 23.26.0.0.0 - Develop, Learn, and Run for Free							   0
+
+
+1 row selected.
+
+SQL> SELECT sys_context('userenv', 'instance_name') AS instance_name FROM dual;
+
+INSTANCE_NAME
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+FREE
+
+1 row selected.
+
+SQL> SELECT sys_context('userenv', 'sid') AS sid FROM dual;
+
+SID
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+37
+
+1 row selected.
+
+SQL> 
+SQL> SELECT parameter, value
+  2  FROM nls_database_parameters
+  3  WHERE parameter IN (
+  4    'NLS_CHARACTERSET',
+  5    'NLS_NCHAR_CHARACTERSET'
+  6  )
+  7  ORDER BY parameter;
+
+PARAMETER															 VALUE
+-------------------------------------------------------------------------------------------------------------------------------- ----------------------------------------------------------------
+NLS_CHARACTERSET														 AL32UTF8
+NLS_NCHAR_CHARACTERSET														 AL16UTF16
+
+2 rows selected.
+
+SQL> 
+SQL> ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD HH24:MI:SS';
+
+Session altered.
+
+SQL> ALTER SESSION SET NLS_TIMESTAMP_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6';
+
+Session altered.
+
+SQL> ALTER SESSION SET NLS_TIMESTAMP_TZ_FORMAT = 'YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM';
+
+Session altered.
+
+SQL> ALTER SESSION SET NLS_NUMERIC_CHARACTERS = '.,';
+
+Session altered.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 1. Clean old objects
+1. Clean old objects
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> BEGIN
+  2    EXECUTE IMMEDIATE 'DROP MATERIALIZED VIEW mattest2';
+  3  EXCEPTION
+  4    WHEN OTHERS THEN
+  5  	 IF SQLCODE NOT IN (-12003, -942) THEN
+  6  	   DBMS_OUTPUT.PUT_LINE('drop mattest2 ignored: ' || SQLERRM);
+  7  	 END IF;
+  8  END;
+  9  /
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> BEGIN
+  2    EXECUTE IMMEDIATE 'DROP VIEW ttv';
+  3  EXCEPTION
+  4    WHEN OTHERS THEN
+  5  	 IF SQLCODE != -942 THEN
+  6  	   DBMS_OUTPUT.PUT_LINE('drop ttv ignored: ' || SQLERRM);
+  7  	 END IF;
+  8  END;
+  9  /
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> BEGIN
+  2    EXECUTE IMMEDIATE 'DROP TABLE typetest1 PURGE';
+  3  EXCEPTION
+  4    WHEN OTHERS THEN
+  5  	 IF SQLCODE != -942 THEN
+  6  	   DBMS_OUTPUT.PUT_LINE('drop typetest1 ignored: ' || SQLERRM);
+  7  	 END IF;
+  8  END;
+  9  /
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> BEGIN
+  2    EXECUTE IMMEDIATE 'DROP TABLE typetest2 PURGE';
+  3  EXCEPTION
+  4    WHEN OTHERS THEN
+  5  	 IF SQLCODE != -942 THEN
+  6  	   DBMS_OUTPUT.PUT_LINE('drop typetest2 ignored: ' || SQLERRM);
+  7  	 END IF;
+  8  END;
+  9  /
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> BEGIN
+  2    EXECUTE IMMEDIATE 'DROP TABLE nodb_conn_dept1 PURGE';
+  3  EXCEPTION
+  4    WHEN OTHERS THEN
+  5  	 IF SQLCODE != -942 THEN
+  6  	   DBMS_OUTPUT.PUT_LINE('drop nodb_conn_dept1 ignored: ' || SQLERRM);
+  7  	 END IF;
+  8  END;
+  9  /
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> BEGIN
+  2    EXECUTE IMMEDIATE 'DROP TABLE nodb_conn_emp4 PURGE';
+  3  EXCEPTION
+  4    WHEN OTHERS THEN
+  5  	 IF SQLCODE != -942 THEN
+  6  	   DBMS_OUTPUT.PUT_LINE('drop nodb_conn_emp4 ignored: ' || SQLERRM);
+  7  	 END IF;
+  8  END;
+  9  /
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> BEGIN
+  2    EXECUTE IMMEDIATE 'DROP TABLE nodb_conn_emp5 PURGE';
+  3  EXCEPTION
+  4    WHEN OTHERS THEN
+  5  	 IF SQLCODE != -942 THEN
+  6  	   DBMS_OUTPUT.PUT_LINE('drop nodb_conn_emp5 ignored: ' || SQLERRM);
+  7  	 END IF;
+  8  END;
+  9  /
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> BEGIN
+  2    EXECUTE IMMEDIATE 'DROP PROCEDURE nodb_bindingtest';
+  3  EXCEPTION
+  4    WHEN OTHERS THEN
+  5  	 IF SQLCODE != -4043 THEN
+  6  	   DBMS_OUTPUT.PUT_LINE('drop procedure ignored: ' || SQLERRM);
+  7  	 END IF;
+  8  END;
+  9  /
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 2. Basic table/query/bind test from node-oracledb style
+2. Basic table/query/bind test from node-oracledb style
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> CREATE TABLE nodb_conn_dept1 (
+  2    department_id   NUMBER,
+  3    department_name VARCHAR2(20)
+  4  );
+
+Table created.
+
+SQL> 
+SQL> INSERT INTO nodb_conn_dept1 VALUES (40, 'Human Resources');
+
+1 row created.
+
+SQL> INSERT INTO nodb_conn_dept1 VALUES (20, 'Marketing');
+
+1 row created.
+
+SQL> 
+SQL> COMMENT ON TABLE nodb_conn_dept1 IS
+  2    'This is a table with information about various departments';
+
+Comment created.
+
+SQL> 
+SQL> COMMIT;
+
+Commit complete.
+
+SQL> 
+SQL> VAR id NUMBER
+SQL> EXEC :id := 40
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> SELECT department_id, department_name
+  2  FROM nodb_conn_dept1
+  3  WHERE department_id = :id;
+
+DEPARTMENT_ID DEPARTMENT_NAME
+------------- --------------------
+	   40 Human Resources
+
+1 row selected.
+
+SQL> 
+SQL> EXEC :id := 20
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> SELECT department_id, department_name
+  2  FROM nodb_conn_dept1
+  3  WHERE department_id = :id;
+
+DEPARTMENT_ID DEPARTMENT_NAME
+------------- --------------------
+	   20 Marketing
+
+1 row selected.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 3. PL/SQL IN / IN OUT / OUT bind behavior
+3. PL/SQL IN / IN OUT / OUT bind behavior
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> CREATE OR REPLACE PROCEDURE nodb_bindingtest (
+  2    p_in	  IN	 VARCHAR2,
+  3    p_inout IN OUT VARCHAR2,
+  4    p_out   OUT	 VARCHAR2
+  5  ) AS
+  6  BEGIN
+  7    p_out := p_in || ' ' || p_inout;
+  8  END;
+  9  /
+
+Procedure created.
+
+SQL> 
+SQL> VAR io VARCHAR2(100)
+SQL> VAR o  VARCHAR2(100)
+SQL> 
+SQL> EXEC :io := 'Turing'
+
+PL/SQL procedure successfully completed.
+
+SQL> EXEC nodb_bindingtest('Alan', :io, :o)
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> PRINT io
+
+IO
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Turing
+
+SQL> PRINT o
+
+O
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+Alan Turing
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 4. Statement cache style repeated SQL
+4. Statement cache style repeated SQL
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> CREATE TABLE nodb_conn_emp4 (
+  2    id   NUMBER,
+  3    name VARCHAR2(4000)
+  4  );
+
+Table created.
+
+SQL> 
+SQL> INSERT INTO nodb_conn_emp4 VALUES (1001, 'Chris Jones');
+
+1 row created.
+
+SQL> INSERT INTO nodb_conn_emp4 VALUES (1002, 'Tom Kyte');
+
+1 row created.
+
+SQL> INSERT INTO nodb_conn_emp4 VALUES (2001, 'Karen Morton');
+
+1 row created.
+
+SQL> COMMIT;
+
+Commit complete.
+
+SQL> 
+SQL> VAR num NUMBER
+SQL> VAR str VARCHAR2(4000)
+SQL> 
+SQL> EXEC :num := 1003; :str := 'Robyn Sands'
+
+PL/SQL procedure successfully completed.
+
+SQL> INSERT INTO nodb_conn_emp4 VALUES (:num, :str);
+
+1 row created.
+
+SQL> 
+SQL> EXEC :num := 1004; :str := 'Bryant Lin'
+
+PL/SQL procedure successfully completed.
+
+SQL> INSERT INTO nodb_conn_emp4 VALUES (:num, :str);
+
+1 row created.
+
+SQL> 
+SQL> EXEC :num := 1005; :str := 'Patrick Engebresson'
+
+PL/SQL procedure successfully completed.
+
+SQL> INSERT INTO nodb_conn_emp4 VALUES (:num, :str);
+
+1 row created.
+
+SQL> 
+SQL> COMMIT;
+
+Commit complete.
+
+SQL> 
+SQL> SELECT id, name FROM nodb_conn_emp4 ORDER BY id;
+
+	ID
+----------
+NAME
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+      1001
+Chris Jones
+
+      1002
+Tom Kyte
+
+      1003
+Robyn Sands
+
+      1004
+Bryant Lin
+
+      1005
+Patrick Engebresson
+
+      2001
+Karen Morton
+
+
+6 rows selected.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 5. Transaction commit / rollback basic behavior
+5. Transaction commit / rollback basic behavior
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> CREATE TABLE nodb_conn_emp5 (
+  2    id   NUMBER,
+  3    name VARCHAR2(4000)
+  4  );
+
+Table created.
+
+SQL> 
+SQL> INSERT INTO nodb_conn_emp5 VALUES (1001, 'Tom Kyte');
+
+1 row created.
+
+SQL> INSERT INTO nodb_conn_emp5 VALUES (1002, 'Karen Morton');
+
+1 row created.
+
+SQL> COMMIT;
+
+Commit complete.
+
+SQL> 
+SQL> INSERT INTO nodb_conn_emp5 VALUES (1003, 'Patrick Engebresson');
+
+1 row created.
+
+SQL> SELECT COUNT(*) AS count_before_rollback FROM nodb_conn_emp5;
+
+COUNT_BEFORE_ROLLBACK
+---------------------
+		    3
+
+1 row selected.
+
+SQL> ROLLBACK;
+
+Rollback complete.
+
+SQL> SELECT COUNT(*) AS count_after_rollback FROM nodb_conn_emp5;
+
+COUNT_AFTER_ROLLBACK
+--------------------
+		   2
+
+1 row selected.
+
+SQL> 
+SQL> INSERT INTO nodb_conn_emp5 VALUES (1003, 'Patrick Engebresson');
+
+1 row created.
+
+SQL> COMMIT;
+
+Commit complete.
+
+SQL> SELECT COUNT(*) AS count_after_commit FROM nodb_conn_emp5;
+
+COUNT_AFTER_COMMIT
+------------------
+		 3
+
+1 row selected.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 6. oracle_fdw remote type table, no GIS
+6. oracle_fdw remote type table, no GIS
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> CREATE TABLE typetest1 (
+  2    id  NUMBER(5) CONSTRAINT typetest1_pkey PRIMARY KEY,
+  3    c   CHAR(10 CHAR),
+  4    nc  NCHAR(10),
+  5    vc  VARCHAR2(10 CHAR),
+  6    nvc NVARCHAR2(10),
+  7    lc  CLOB,
+  8    lnc NCLOB,
+  9    r   RAW(10),
+ 10    u   RAW(16),
+ 11    lb  BLOB,
+ 12    lr  LONG RAW,
+ 13    b   NUMBER(1),
+ 14    num NUMBER(7,5),
+ 15    fl  BINARY_FLOAT,
+ 16    db  BINARY_DOUBLE,
+ 17    d   DATE,
+ 18    ts  TIMESTAMP WITH TIME ZONE,
+ 19    ids INTERVAL DAY TO SECOND,
+ 20    iym INTERVAL YEAR TO MONTH
+ 21  ) SEGMENT CREATION IMMEDIATE;
+
+Table created.
+
+SQL> 
+SQL> CREATE VIEW ttv AS
+  2  SELECT id, vc FROM typetest1;
+
+View created.
+
+SQL> 
+SQL> CREATE TABLE typetest2 (
+  2    id  NUMBER(5) CONSTRAINT typetest2_pkey PRIMARY KEY,
+  3    ts1 TIMESTAMP WITH LOCAL TIME ZONE,
+  4    ts2 TIMESTAMP WITH LOCAL TIME ZONE,
+  5    ts3 TIMESTAMP WITH LOCAL TIME ZONE
+  6  ) SEGMENT CREATION IMMEDIATE;
+
+Table created.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 7. Type insertion tests
+7. Type insertion tests
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> INSERT INTO typetest1 (
+  2    id, c, nc, vc, nvc, lc, lnc, r, u, lb, lr,
+  3    b, num, fl, db, d, ts, ids, iym
+  4  ) VALUES (
+  5    1,
+  6    'fixed char',
+  7    N'natl char',
+  8    'varlena',
+  9    N'natl var',
+ 10    TO_CLOB('character large object'),
+ 11    TO_NCLOB(N'character national large object'),
+ 12    HEXTORAW('DEADBEEF'),
+ 13    HEXTORAW('055E26FAF1D8771FE0531645990ADD93'),
+ 14    TO_BLOB(HEXTORAW('DEADBEEF')),
+ 15    HEXTORAW('DEADBEEF'),
+ 16    1,
+ 17    3.14159,
+ 18    3.14159f,
+ 19    3.14159d,
+ 20    DATE '1968-10-20',
+ 21    TO_TIMESTAMP_TZ('2009-01-26 15:02:54.893532 -08:00',
+ 22  		       'YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM'),
+ 23    INTERVAL '1 02:00:30.000001' DAY TO SECOND,
+ 24    INTERVAL '-0-6' YEAR TO MONTH
+ 25  );
+
+1 row created.
+
+SQL> 
+SQL> INSERT INTO typetest1 (
+  2    id, c, nc, vc, nvc, lc, lnc, r, u, lb, lr,
+  3    b, num, fl, db, d, ts, ids, iym
+  4  ) VALUES (
+  5    2,
+  6    NULL,
+  7    NULL,
+  8    NULL,
+  9    NULL,
+ 10    NULL,
+ 11    NULL,
+ 12    HEXTORAW('00'),
+ 13    HEXTORAW('00000000000000000000000000000000'),
+ 14    EMPTY_BLOB(),
+ 15    HEXTORAW('00'),
+ 16    NULL,
+ 17    NULL,
+ 18    NULL,
+ 19    NULL,
+ 20    NULL,
+ 21    NULL,
+ 22    NULL,
+ 23    NULL
+ 24  );
+
+1 row created.
+
+SQL> 
+SQL> INSERT INTO typetest1 (
+  2    id, c, nc, vc, nvc, lc, lnc, r, u, lb, lr,
+  3    b, num, fl, db, d, ts, ids, iym
+  4  ) VALUES (
+  5    3,
+  6    'short',
+  7    N'short',
+  8    'short',
+  9    N'short',
+ 10    TO_CLOB('short'),
+ 11    TO_NCLOB(N'short'),
+ 12    HEXTORAW('DEADF00D'),
+ 13    HEXTORAW('0560EE342EF91137E0531645990AC874'),
+ 14    TO_BLOB(HEXTORAW('DEADF00D')),
+ 15    HEXTORAW('DEADF00D'),
+ 16    0,
+ 17    -2.71828,
+ 18    -2.71828f,
+ 19    -2.71828d,
+ 20    TO_DATE('0044-03-15 BC', 'YYYY-MM-DD BC'),
+ 21    TO_TIMESTAMP_TZ('0044-03-15 12:00:00 -00:00 BC',
+ 22  		       'YYYY-MM-DD HH24:MI:SS TZH:TZM BC'),
+ 23    INTERVAL '-2 12:30:00' DAY TO SECOND,
+ 24    INTERVAL '-2-6' YEAR TO MONTH
+ 25  );
+
+1 row created.
+
+SQL> 
+SQL> COMMIT;
+
+Commit complete.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 8. Type readback / metadata-visible behavior
+8. Type readback / metadata-visible behavior
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> SELECT
+  2    id,
+  3    c,
+  4    nc,
+  5    vc,
+  6    nvc,
+  7    DBMS_LOB.GETLENGTH(lc)  AS lc_len,
+  8    DBMS_LOB.GETLENGTH(lnc) AS lnc_len,
+  9    RAWTOHEX(r) AS r_hex,
+ 10    RAWTOHEX(u) AS u_hex,
+ 11    DBMS_LOB.GETLENGTH(lb) AS lb_len,
+ 12    b,
+ 13    num,
+ 14    fl,
+ 15    db,
+ 16    d,
+ 17    ts,
+ 18    ids,
+ 19    iym
+ 20  FROM typetest1
+ 21  ORDER BY id;
+
+	ID C	      NC	 VC	    NVC 	   LC_LEN    LNC_LEN R_HEX		  U_HEX 			       LB_LEN	       B	NUM	    FL	       DB
+---------- ---------- ---------- ---------- ---------- ---------- ---------- -------------------- -------------------------------- ---------- ---------- ---------- ---------- ----------
+D		    TS										IDS
+------------------- --------------------------------------------------------------------------- ---------------------------------------------------------------------------
+IYM
+---------------------------------------------------------------------------
+	 1 fixed char natl char  varlena    natl var	       22	  31 DEADBEEF		  055E26FAF1D8771FE0531645990ADD93	    4	       1    3.14159 3.142E+000 3.142E+000
+1968-10-20 00:00:00 2009-01-26 15:02:54.893532 -08:00						+01 02:00:30.000001
+-00-06
+
+	 2								     00 		  00000000000000000000000000000000	    0
+
+
+
+	 3 short      short	 short	    short		5	   5 DEADF00D		  0560EE342EF91137E0531645990AC874	    4	       0   -2.71828 -2.72E+000 -2.72E+000
+0044-03-15 00:00:00 0044-03-15 12:00:00.000000 +00:00						-02 12:30:00.000000
+-02-06
+
+
+3 rows selected.
+
+SQL> 
+SQL> SELECT column_name, data_type, char_length, data_precision, data_scale, nullable
+  2  FROM user_tab_columns
+  3  WHERE table_name = 'TYPETEST1'
+  4  ORDER BY column_id;
+
+COLUMN_NAME
+--------------------------------------------------------------------------------------------------------------------------------
+DATA_TYPE															 CHAR_LENGTH DATA_PRECISION DATA_SCALE N
+-------------------------------------------------------------------------------------------------------------------------------- ----------- -------------- ---------- -
+ID
+NUMBER																	   0		  5	     0 N
+
+C
+CHAR																	  10			       Y
+
+NC
+NCHAR																	  10			       Y
+
+VC
+VARCHAR2																  10			       Y
+
+NVC
+NVARCHAR2																  10			       Y
+
+LC
+CLOB																	   0			       Y
+
+LNC
+NCLOB																	   0			       Y
+
+R
+RAW																	   0			       Y
+
+U
+RAW																	   0			       Y
+
+LB
+BLOB																	   0			       Y
+
+LR
+LONG RAW																   0			       Y
+
+B
+NUMBER																	   0		  1	     0 Y
+
+NUM
+NUMBER																	   0		  7	     5 Y
+
+FL
+BINARY_FLOAT																   0			       Y
+
+DB
+BINARY_DOUBLE																   0			       Y
+
+D
+DATE																	   0			       Y
+
+TS
+TIMESTAMP(6) WITH TIME ZONE														   0			     6 Y
+
+IDS
+INTERVAL DAY(2) TO SECOND(6)														   0		  2	     6 Y
+
+IYM
+INTERVAL YEAR(2) TO MONTH														   0		  2	     0 Y
+
+
+19 rows selected.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 9. TIMESTAMP WITH LOCAL TIME ZONE
+9. TIMESTAMP WITH LOCAL TIME ZONE
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> INSERT INTO typetest2 (id, ts1, ts2, ts3) VALUES (
+  2    1,
+  3    FROM_TZ(CAST(TIMESTAMP '2002-08-01 00:00:00' AS TIMESTAMP), 'UTC'),
+  4    FROM_TZ(CAST(TIMESTAMP '2002-08-01 00:00:00' AS TIMESTAMP), 'UTC'),
+  5    FROM_TZ(CAST(TIMESTAMP '2002-08-01 00:00:00' AS TIMESTAMP), 'UTC')
+  6  );
+
+1 row created.
+
+SQL> 
+SQL> ALTER SESSION SET TIME_ZONE = 'UTC';
+
+Session altered.
+
+SQL> 
+SQL> INSERT INTO typetest2 (id, ts1, ts2, ts3) VALUES (
+  2    2,
+  3    TIMESTAMP '2020-12-31 00:00:00',
+  4    TIMESTAMP '2020-12-31 00:00:00',
+  5    TIMESTAMP '2020-12-31 00:00:00'
+  6  );
+
+1 row created.
+
+SQL> 
+SQL> ALTER SESSION SET TIME_ZONE = 'Asia/Kolkata';
+
+Session altered.
+
+SQL> 
+SQL> INSERT INTO typetest2 (id, ts1, ts2, ts3) VALUES (
+  2    3,
+  3    TIMESTAMP '2020-12-31 00:00:00',
+  4    TIMESTAMP '2020-12-31 00:00:00',
+  5    TIMESTAMP '2020-12-31 00:00:00'
+  6  );
+
+1 row created.
+
+SQL> 
+SQL> COMMIT;
+
+Commit complete.
+
+SQL> 
+SQL> SELECT id, ts1, ts2, ts3 FROM typetest2 ORDER BY id;
+
+	ID TS1									       TS2
+---------- --------------------------------------------------------------------------- ---------------------------------------------------------------------------
+TS3
+---------------------------------------------------------------------------
+	 1 2002-08-01 05:30:00.000000						       2002-08-01 05:30:00.000000
+2002-08-01 05:30:00.000000
+
+	 2 2020-12-31 05:30:00.000000						       2020-12-31 05:30:00.000000
+2020-12-31 05:30:00.000000
+
+	 3 2020-12-31 00:00:00.000000						       2020-12-31 00:00:00.000000
+2020-12-31 00:00:00.000000
+
+
+3 rows selected.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 10. INTERVAL direct select
+10. INTERVAL direct select
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> SELECT INTERVAL '10-2' YEAR TO MONTH AS iym FROM dual;
+
+IYM
+---------------------------------------------------------------------------
++10-02
+
+1 row selected.
+
+SQL> SELECT INTERVAL '11 10:09:08.555' DAY TO SECOND AS ids FROM dual;
+
+IDS
+---------------------------------------------------------------------------
++11 10:09:08.555000
+
+1 row selected.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 11. Error behavior and recovery after bad execute
+11. Error behavior and recovery after bad execute
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> BEGIN
+  2    RAISE_APPLICATION_ERROR(-20000, 'application error raised');
+  3  END;
+  4  /
+BEGIN
+*
+ERROR at line 1:
+ORA-20000: application error raised
+ORA-06512: at line 2
+
+
+SQL> 
+SQL> BEGIN
+  2    NULL;
+  3  END;
+  4  /
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> SELECT y FROM dual;
+SELECT y FROM dual
+       *
+ERROR at line 1:
+ORA-00904: "Y": invalid identifier
+
+
+SQL> SELECT 1 + 1 AS after_bad_execute FROM dual;
+
+AFTER_BAD_EXECUTE
+-----------------
+		2
+
+1 row selected.
+
+SQL> 
+SQL> SELECT 1e126 FROM dual;
+SELECT 1e126 FROM dual
+       *
+ERROR at line 1:
+ORA-01426: numeric overflow
+
+
+SQL> SELECT 1 / 0 FROM dual;
+SELECT 1 / 0 FROM dual
+         *
+ERROR at line 1:
+ORA-01476: divisor is equal to zero
+
+
+SQL> SELECT NaN FROM dual;
+SELECT NaN FROM dual
+       *
+ERROR at line 1:
+ORA-00904: "NAN": invalid identifier
+
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 12. Session parameter visibility
+12. Session parameter visibility
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> SELECT machine, osuser, terminal, program
+  2  FROM v$session
+  3  WHERE sid = SYS_CONTEXT('USERENV', 'SID');
+
+MACHINE 							 OSUSER
+---------------------------------------------------------------- --------------------------------------------------------------------------------------------------------------------------------
+TERMINAL		       PROGRAM
+------------------------------ ------------------------------------------------------------------------------------
+zarra-desktop							 zarra
+			       sqlplus@zarra-desktop (TNS V1-V3)
+
+
+1 row selected.
+
+SQL> 
+SQL> SELECT client_driver
+  2  FROM v$session_connect_info
+  3  WHERE sid = SYS_CONTEXT('USERENV', 'SID');
+
+CLIENT_DRIVER
+------------------------------
+SQL*PLUS
+SQL*PLUS
+SQL*PLUS
+
+3 rows selected.
+
+SQL> 
+SQL> 
+SQL> PROMPT =========================================================
+=========================================================
+SQL> PROMPT 13. Materialized view and stats
+13. Materialized view and stats
+SQL> PROMPT =========================================================
+=========================================================
+SQL> 
+SQL> CREATE MATERIALIZED VIEW mattest2 REFRESH COMPLETE AS
+  2  SELECT id, ts1, ts2, ts3 FROM typetest2;
+
+Materialized view created.
+
+SQL> 
+SQL> BEGIN
+  2    DBMS_STATS.GATHER_TABLE_STATS(USER, 'TYPETEST1', NULL, 100);
+  3    DBMS_STATS.GATHER_TABLE_STATS(USER, 'TYPETEST2', NULL, 100);
+  4  END;
+  5  /
+
+PL/SQL procedure successfully completed.
+
+SQL> 
+SQL> SELECT table_name, num_rows
+  2  FROM user_tables
+  3  WHERE table_name IN ('TYPETEST1', 'TYPETEST2')
+  4  ORDER BY table_name;
+
+TABLE_NAME															   NUM_ROWS
+-------------------------------------------------------------------------------------------------------------------------------- ----------
+TYPETEST1																  3
+TYPETEST2																  3
+
+2 rows selected.
+
+SQL> 
+SQL> PROMPT DONE
+DONE
+SQL> Disconnected from Oracle AI Database 26ai Free Release 23.26.0.0.0 - Develop, Learn, and Run for Free
+Version 23.26.0.0.0

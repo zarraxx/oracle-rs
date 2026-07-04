@@ -4,8 +4,7 @@
 //! that are negotiated between client and server during connection establishment.
 
 use crate::constants::{
-    accept_flags, ccap_index, ccap_value, charset, rcap_index, rcap_value, service_options,
-    version,
+    accept_flags, ccap_index, ccap_value, charset, rcap_index, rcap_value, service_options, version,
 };
 
 /// Driver name sent during protocol negotiation
@@ -127,7 +126,7 @@ impl Capabilities {
 
         self.compile_caps[SESS_SIGNATURE_VERSION] = FIELD_VERSION_12_2;
 
-        self.compile_caps[TTC4] = INBAND_NOTIFICATION | EXPLICIT_BOUNDARY;
+        self.compile_caps[TTC4] = INBAND_NOTIFICATION;
 
         self.compile_caps[TTC5] = VECTOR_SUPPORT
             | TOKEN_SUPPORTED
@@ -136,6 +135,8 @@ impl Capabilities {
             | SESSIONLESS_TXNS;
 
         self.compile_caps[VECTOR_FEATURES] = VECTOR_FEATURE_BINARY | VECTOR_FEATURE_SPARSE;
+
+        self.compile_caps[FEATURE_BACKPORT2] = END_USER_SEC_CTX_PIGGYBACK;
     }
 
     /// Initialize runtime capabilities

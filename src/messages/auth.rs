@@ -15,7 +15,9 @@ use std::collections::HashMap;
 
 use crate::buffer::{ReadBuffer, WriteBuffer};
 use crate::capabilities::Capabilities;
-use crate::constants::{auth_mode, verifier_type, FunctionCode, MessageType, PacketType, PACKET_HEADER_SIZE};
+use crate::constants::{
+    auth_mode, data_flags, verifier_type, FunctionCode, MessageType, PacketType, PACKET_HEADER_SIZE,
+};
 use crate::crypto::{
     decrypt_cbc_192, decrypt_cbc_256, encrypt_cbc_192, encrypt_cbc_256_pkcs7,
     generate_11g_combo_key, generate_11g_password_hash, generate_12c_combo_key,
@@ -126,23 +128,24 @@ pub enum AuthPhase {
 
 impl AuthMessage {
     /// Create a new authentication message
-    pub fn new(
-        username: &str,
-        password: &[u8],
-        service_name: &str,
-    ) -> Self {
+    pub fn new(username: &str, password: &[u8], service_name: &str) -> Self {
         Self {
             username: username.to_uppercase(),
             password: password.to_vec(),
             phase: AuthPhase::One,
-            auth_mode: auth_mode::LOGON,
+            auth_mode: auth_mode::LOGON | auth_mode::WITH_PASSWORD,
             session_data: SessionData::default(),
             verifier_type: 0,
             combo_key: None,
             client_session_key: None,
             terminal: std::env::var("TERM").unwrap_or_else(|_| "unknown".to_string()),
             program: std::env::current_exe()
-                .map(|p| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+                .map(|p| {
+                    p.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string()
+                })
                 .unwrap_or_else(|_| "oracle-rs".to_string()),
             machine: hostname::get()
                 .map(|h| h.to_string_lossy().to_string())
@@ -151,7 +154,7 @@ impl AuthMessage {
                 .or_else(|_| std::env::var("USERNAME"))
                 .unwrap_or_else(|_| "unknown".to_string()),
             pid: std::process::id().to_string(),
-            driver_name: format!("oracle-rs : {}", env!("CARGO_PKG_VERSION")),
+            driver_name: format!("oracle-rs : {} thn", env!("CARGO_PKG_VERSION")),
             _service_name: service_name.to_string(),
             sequence_number: 1,
         }
@@ -194,7 +197,9 @@ impl AuthMessage {
         match self.phase {
             AuthPhase::One => self.build_phase_one(caps, large_sdu),
             AuthPhase::Two => self.build_phase_two(caps, large_sdu),
-            AuthPhase::Complete => Err(Error::Protocol("Authentication already complete".to_string())),
+            AuthPhase::Complete => Err(Error::Protocol(
+                "Authentication already complete".to_string(),
+            )),
         }
     }
 
@@ -206,58 +211,9 @@ impl AuthMessage {
         buf.write_zeros(PACKET_HEADER_SIZE)?;
 
         // Data flags (2 bytes)
-        buf.write_u16_be(0)?;
+        buf.write_u16_be(data_flags::END_OF_REQUEST)?;
 
-        // Message type
-        buf.write_u8(MessageType::Function as u8)?;
-
-        // Function code
-        buf.write_u8(FunctionCode::AuthPhaseOne as u8)?;
-
-        // Sequence number
-        buf.write_u8(self.sequence_number)?;
-
-        // Token number (required for TTC field version >= 18, which is true for Oracle 23ai)
-        // TNS_CCAP_FIELD_VERSION_23_1_EXT_1 = 18
-        if caps.ttc_field_version >= 18 {
-            buf.write_ub8(0)?;
-        }
-
-        // User pointer (1 if username present, 0 otherwise)
-        let has_user = !self.username.is_empty();
-        buf.write_u8(if has_user { 1 } else { 0 })?;
-
-        // User length
-        let user_bytes = self.username.as_bytes();
-        buf.write_ub4(user_bytes.len() as u32)?;
-
-        // Auth mode
-        buf.write_ub4(self.auth_mode)?;
-
-        // Auth value list pointer (always 1)
-        buf.write_u8(1)?;
-
-        // Number of key/value pairs
-        let num_pairs = 5u32;
-        buf.write_ub4(num_pairs)?;
-
-        // Output value list pointer (always 1)
-        buf.write_u8(1)?;
-
-        // Output value list count pointer (always 1)
-        buf.write_u8(1)?;
-
-        // Write username if present
-        if has_user {
-            buf.write_bytes_with_length(Some(user_bytes))?;
-        }
-
-        // Write key/value pairs
-        self.write_key_value(&mut buf, "AUTH_TERMINAL", &self.terminal, 0)?;
-        self.write_key_value(&mut buf, "AUTH_PROGRAM_NM", &self.program, 0)?;
-        self.write_key_value(&mut buf, "AUTH_MACHINE", &self.machine, 0)?;
-        self.write_key_value(&mut buf, "AUTH_PID", &self.pid, 0)?;
-        self.write_key_value(&mut buf, "AUTH_SID", &self.osuser, 0)?;
+        self.write_phase_one_message(&mut buf, caps)?;
 
         // Calculate total length and write header
         let total_len = buf.len() as u32;
@@ -276,7 +232,9 @@ impl AuthMessage {
     fn build_phase_two(&self, caps: &Capabilities, large_sdu: bool) -> Result<Bytes> {
         // This requires session data from phase one response
         let encoded_password = self.encode_password()?;
-        let session_key = self.client_session_key.as_ref()
+        let session_key = self
+            .client_session_key
+            .as_ref()
             .ok_or_else(|| Error::Protocol("Client session key not generated".to_string()))?;
 
         let mut buf = WriteBuffer::with_capacity(1024);
@@ -285,87 +243,9 @@ impl AuthMessage {
         buf.write_zeros(PACKET_HEADER_SIZE)?;
 
         // Data flags (2 bytes)
-        buf.write_u16_be(0)?;
+        buf.write_u16_be(data_flags::END_OF_REQUEST)?;
 
-        // Message type
-        buf.write_u8(MessageType::Function as u8)?;
-
-        // Function code
-        buf.write_u8(FunctionCode::AuthPhaseTwo as u8)?;
-
-        // Sequence number (2 for phase two since phase one used 1)
-        buf.write_u8(2)?;
-
-        // Token number (required for TTC field version >= 18, which is true for Oracle 23ai)
-        // TNS_CCAP_FIELD_VERSION_23_1_EXT_1 = 18
-        if caps.ttc_field_version >= 18 {
-            buf.write_ub8(0)?;
-        }
-
-        // User pointer
-        let has_user = !self.username.is_empty();
-        buf.write_u8(if has_user { 1 } else { 0 })?;
-
-        // User length
-        let user_bytes = self.username.as_bytes();
-        buf.write_ub4(user_bytes.len() as u32)?;
-
-        // Auth mode (with password flag)
-        let mode = self.auth_mode | auth_mode::WITH_PASSWORD;
-        buf.write_ub4(mode)?;
-
-        // Auth value list pointer
-        buf.write_u8(1)?;
-
-        // Calculate number of pairs based on verifier type
-        // Base pairs: AUTH_SESSKEY, AUTH_PASSWORD, SESSION_CLIENT_CHARSET,
-        //             SESSION_CLIENT_DRIVER_NAME, SESSION_CLIENT_VERSION, AUTH_ALTER_SESSION = 6
-        // For 12c verifier: add AUTH_PBKDF2_SPEEDY_KEY = 7
-        let num_pairs = if self.verifier_type == verifier_type::V12C {
-            7u32 // 6 base + AUTH_PBKDF2_SPEEDY_KEY
-        } else {
-            6u32 // base pairs only
-        };
-        buf.write_ub4(num_pairs)?;
-
-        // Output value list pointer
-        buf.write_u8(1)?;
-
-        // Output value list count pointer
-        buf.write_u8(1)?;
-
-        // Write username if present
-        if has_user {
-            buf.write_bytes_with_length(Some(user_bytes))?;
-        }
-
-        // Session key (client portion)
-        let session_key_hex = hex::encode_upper(session_key);
-        // For 12c, use first 64 chars; for 11g, use first 96 chars
-        let key_len = if self.verifier_type == verifier_type::V12C { 64 } else { 96 };
-        let key_str = &session_key_hex[..key_len.min(session_key_hex.len())];
-        self.write_key_value(&mut buf, "AUTH_SESSKEY", key_str, 1)?;
-
-        // For 12c, include speedy key
-        if self.verifier_type == verifier_type::V12C {
-            if let Some(speedy) = self.generate_speedy_key()? {
-                self.write_key_value(&mut buf, "AUTH_PBKDF2_SPEEDY_KEY", &speedy, 0)?;
-            }
-        }
-
-        // Encrypted password
-        self.write_key_value(&mut buf, "AUTH_PASSWORD", &encoded_password, 0)?;
-
-        // Session parameters
-        self.write_key_value(&mut buf, "SESSION_CLIENT_CHARSET", "873", 0)?;
-        self.write_key_value(&mut buf, "SESSION_CLIENT_DRIVER_NAME", &self.driver_name, 0)?;
-        // Client version in Python format (packed version number)
-        // Python oracledb sends "54530048" which represents version info
-        self.write_key_value(&mut buf, "SESSION_CLIENT_VERSION", "54530048", 0)?;
-
-        // Timezone alter session
-        let tz_stmt = self.get_alter_timezone_statement();
-        self.write_key_value(&mut buf, "AUTH_ALTER_SESSION", &tz_stmt, 1)?;
+        self.write_phase_two_message(&mut buf, caps, session_key, &encoded_password)?;
 
         // Calculate total length and write header
         let total_len = buf.len() as u32;
@@ -378,6 +258,127 @@ impl AuthMessage {
         result[..PACKET_HEADER_SIZE].copy_from_slice(header_buf.as_slice());
 
         Ok(result.freeze())
+    }
+
+    /// Encode auth phase one without packet framing.
+    pub(crate) fn write_phase_one_message(
+        &self,
+        buf: &mut WriteBuffer,
+        caps: &Capabilities,
+    ) -> Result<()> {
+        // Message type
+        buf.write_u8(MessageType::Function as u8)?;
+
+        // Function code
+        buf.write_u8(FunctionCode::AuthPhaseOne as u8)?;
+
+        // Sequence number
+        buf.write_u8(self.sequence_number)?;
+
+        // Token number (Oracle 23.1 ext1+)
+        if caps.ttc_field_version >= 18 {
+            buf.write_ub8(0)?;
+        }
+
+        let has_user = !self.username.is_empty();
+        buf.write_u8(if has_user { 1 } else { 0 })?;
+
+        let user_bytes = self.username.as_bytes();
+        buf.write_ub4(user_bytes.len() as u32)?;
+        buf.write_ub4(self.auth_mode)?;
+        buf.write_u8(1)?;
+        buf.write_ub4(5)?;
+
+        // node-oracledb sends a null output value list pointer in phase one.
+        buf.write_u8(0)?;
+        buf.write_u8(1)?;
+
+        if has_user {
+            buf.write_bytes_with_length(Some(user_bytes))?;
+        }
+
+        self.write_key_value(buf, "AUTH_TERMINAL", &self.terminal, 0)?;
+        self.write_key_value(buf, "AUTH_PROGRAM_NM", &self.program, 0)?;
+        self.write_key_value(buf, "AUTH_MACHINE", &self.machine, 0)?;
+        self.write_key_value(buf, "AUTH_PID", &self.pid, 0)?;
+        self.write_key_value(buf, "AUTH_SID", &self.osuser, 0)?;
+
+        Ok(())
+    }
+
+    fn write_phase_two_message(
+        &self,
+        buf: &mut WriteBuffer,
+        caps: &Capabilities,
+        session_key: &[u8],
+        encoded_password: &str,
+    ) -> Result<()> {
+        // Message type
+        buf.write_u8(MessageType::Function as u8)?;
+
+        // Function code
+        buf.write_u8(FunctionCode::AuthPhaseTwo as u8)?;
+
+        // Sequence number (2 for phase two since phase one used 1)
+        buf.write_u8(2)?;
+
+        // Token number (Oracle 23.1 ext1+)
+        if caps.ttc_field_version >= 18 {
+            buf.write_ub8(0)?;
+        }
+
+        let has_user = !self.username.is_empty();
+        buf.write_u8(if has_user { 1 } else { 0 })?;
+
+        let user_bytes = self.username.as_bytes();
+        buf.write_ub4(user_bytes.len() as u32)?;
+
+        let mode = self.auth_mode | auth_mode::WITH_PASSWORD;
+        buf.write_ub4(mode)?;
+        buf.write_u8(1)?;
+
+        let num_pairs = if self.verifier_type == verifier_type::V12C {
+            7u32
+        } else {
+            6u32
+        };
+        buf.write_ub4(num_pairs)?;
+        buf.write_u8(1)?;
+        buf.write_u8(1)?;
+
+        if has_user {
+            buf.write_bytes_with_length(Some(user_bytes))?;
+        }
+
+        let session_key_hex = hex::encode_upper(session_key);
+        let key_len = if self.verifier_type == verifier_type::V12C {
+            64
+        } else {
+            96
+        };
+        let key_str = &session_key_hex[..key_len.min(session_key_hex.len())];
+        self.write_key_value(buf, "AUTH_SESSKEY", key_str, 1)?;
+
+        if self.verifier_type == verifier_type::V12C {
+            if let Some(speedy) = self.generate_speedy_key()? {
+                self.write_key_value(buf, "AUTH_PBKDF2_SPEEDY_KEY", &speedy, 0)?;
+            }
+        }
+
+        self.write_key_value(buf, "AUTH_PASSWORD", encoded_password, 0)?;
+        self.write_key_value(buf, "SESSION_CLIENT_CHARSET", "873", 0)?;
+        self.write_key_value(buf, "SESSION_CLIENT_DRIVER_NAME", &self.driver_name, 0)?;
+        self.write_key_value(
+            buf,
+            "SESSION_CLIENT_VERSION",
+            &Self::client_version_string(),
+            0,
+        )?;
+
+        let tz_stmt = self.get_alter_timezone_statement();
+        self.write_key_value(buf, "AUTH_ALTER_SESSION", &tz_stmt, 1)?;
+
+        Ok(())
     }
 
     /// Write a key-value pair to the buffer
@@ -417,25 +418,29 @@ impl AuthMessage {
         // Read message type
         let msg_type = buf.read_u8()?;
         if msg_type == MessageType::Error as u8 {
-            return Err(Error::AuthenticationFailed("Server returned error".to_string()));
+            return Err(Error::AuthenticationFailed(
+                "Server returned error".to_string(),
+            ));
         }
 
-        // Parse return parameters
-        // AUTH response uses UB2 format: indicator byte + value byte(s)
+        // Parse return parameters using the same layout as node-oracledb:
+        //   UB4 metadata, key string, UB4 value length, value string, UB4 flags
         let num_params = buf.read_ub2()?;
         let mut pairs = HashMap::new();
         let mut vtype = 0u32;
 
         for _ in 0..num_params {
-            // AUTH response strings use: indicator (1) + length (1) + length_confirm (1) + data
-            let key = Self::read_auth_string(&mut buf)?;
-            let value = Self::read_auth_string(&mut buf)?;
-
-            // For AUTH_VFR_DATA, also read the verifier type
-            if key == "AUTH_VFR_DATA" {
-                vtype = buf.read_ub4()?;
+            buf.skip_ub4()?;
+            let key = buf.read_string_with_length()?.unwrap_or_default();
+            let value_len = buf.read_ub4()?;
+            let value = if value_len > 0 {
+                buf.read_string_with_length()?.unwrap_or_default()
             } else {
-                buf.skip_ub4()?; // Skip flags
+                String::new()
+            };
+            let flags = buf.read_ub4()?;
+            if key == "AUTH_VFR_DATA" {
+                vtype = flags;
             }
 
             pairs.insert(key, value);
@@ -445,6 +450,13 @@ impl AuthMessage {
         // Only update verifier_type if we found AUTH_VFR_DATA (phase one only)
         if vtype != 0 {
             self.verifier_type = vtype;
+        }
+
+        if self.phase == AuthPhase::One && std::env::var_os("ORACLE_RS_TRACE_AUTH").is_some() {
+            eprintln!(
+                "[auth-debug] phase1 verifier_type={} session_data={:?}",
+                self.verifier_type, self.session_data
+            );
         }
 
         // Advance phase
@@ -469,6 +481,7 @@ impl AuthMessage {
     /// - 0: absent/empty string
     /// - 1: string follows (length + length_confirm + data)
     /// - 2: extra sub-indicator byte follows (used by Oracle 19c+)
+    #[cfg(test)]
     fn read_auth_string(buf: &mut ReadBuffer) -> Result<String> {
         let indicator = buf.read_u8()?;
         if indicator == 0 {
@@ -501,12 +514,18 @@ impl AuthMessage {
 
     /// Generate the verifier (session keys and combo key)
     fn generate_verifier(&mut self) -> Result<()> {
-        let vfr_data = self.session_data.auth_vfr_data.as_ref()
+        let vfr_data = self
+            .session_data
+            .auth_vfr_data
+            .as_ref()
             .ok_or_else(|| Error::AuthenticationFailed("Missing AUTH_VFR_DATA".to_string()))?;
         let vfr_bytes = hex::decode(vfr_data)
             .map_err(|e| Error::Protocol(format!("Invalid AUTH_VFR_DATA hex: {}", e)))?;
 
-        let server_key = self.session_data.auth_sesskey.as_ref()
+        let server_key = self
+            .session_data
+            .auth_sesskey
+            .as_ref()
             .ok_or_else(|| Error::AuthenticationFailed("Missing AUTH_SESSKEY".to_string()))?;
         let server_key_bytes = hex::decode(server_key)
             .map_err(|e| Error::Protocol(format!("Invalid AUTH_SESSKEY hex: {}", e)))?;
@@ -522,8 +541,9 @@ impl AuthMessage {
 
     /// Generate 12c verifier
     fn generate_12c_verifier(&mut self, vfr_data: &[u8], server_key: &[u8]) -> Result<()> {
-        let iterations = self.session_data.auth_pbkdf2_vgen_count
-            .ok_or_else(|| Error::AuthenticationFailed("Missing AUTH_PBKDF2_VGEN_COUNT".to_string()))?;
+        let iterations = self.session_data.auth_pbkdf2_vgen_count.ok_or_else(|| {
+            Error::AuthenticationFailed("Missing AUTH_PBKDF2_VGEN_COUNT".to_string())
+        })?;
 
         // Generate password hash
         let password_hash = generate_12c_password_hash(&self.password, vfr_data, iterations);
@@ -539,12 +559,18 @@ impl AuthMessage {
         self.client_session_key = Some(encrypted_client_key);
 
         // Generate combo key
-        let csk_salt = self.session_data.auth_pbkdf2_csk_salt.as_ref()
-            .ok_or_else(|| Error::AuthenticationFailed("Missing AUTH_PBKDF2_CSK_SALT".to_string()))?;
+        let csk_salt = self
+            .session_data
+            .auth_pbkdf2_csk_salt
+            .as_ref()
+            .ok_or_else(|| {
+                Error::AuthenticationFailed("Missing AUTH_PBKDF2_CSK_SALT".to_string())
+            })?;
         let csk_salt_bytes = hex::decode(csk_salt)
             .map_err(|e| Error::Protocol(format!("Invalid CSK_SALT hex: {}", e)))?;
-        let sder_count = self.session_data.auth_pbkdf2_sder_count
-            .ok_or_else(|| Error::AuthenticationFailed("Missing AUTH_PBKDF2_SDER_COUNT".to_string()))?;
+        let sder_count = self.session_data.auth_pbkdf2_sder_count.ok_or_else(|| {
+            Error::AuthenticationFailed("Missing AUTH_PBKDF2_SDER_COUNT".to_string())
+        })?;
 
         self.combo_key = Some(generate_12c_combo_key(
             &session_key_part_a,
@@ -582,7 +608,9 @@ impl AuthMessage {
 
     /// Encrypt the password using the combo key
     fn encode_password(&self) -> Result<String> {
-        let combo_key = self.combo_key.as_ref()
+        let combo_key = self
+            .combo_key
+            .as_ref()
             .ok_or_else(|| Error::Protocol("Combo key not generated".to_string()))?;
 
         // Add random salt to password
@@ -606,16 +634,23 @@ impl AuthMessage {
             return Ok(None);
         }
 
-        let combo_key = self.combo_key.as_ref()
+        let combo_key = self
+            .combo_key
+            .as_ref()
             .ok_or_else(|| Error::Protocol("Combo key not generated".to_string()))?;
 
         // Generate speedy key data
-        let vfr_data = self.session_data.auth_vfr_data.as_ref()
+        let vfr_data = self
+            .session_data
+            .auth_vfr_data
+            .as_ref()
             .ok_or_else(|| Error::AuthenticationFailed("Missing AUTH_VFR_DATA".to_string()))?;
         let vfr_bytes = hex::decode(vfr_data)
             .map_err(|e| Error::Protocol(format!("Invalid AUTH_VFR_DATA hex: {}", e)))?;
 
-        let iterations = self.session_data.auth_pbkdf2_vgen_count
+        let iterations = self
+            .session_data
+            .auth_pbkdf2_vgen_count
             .ok_or_else(|| Error::AuthenticationFailed("Missing iterations".to_string()))?;
 
         // Create salt for password key derivation
@@ -635,7 +670,9 @@ impl AuthMessage {
     /// Verify server response after phase two
     fn verify_server_response(&self) -> Result<()> {
         if let Some(response) = &self.session_data.auth_svr_response {
-            let combo_key = self.combo_key.as_ref()
+            let combo_key = self
+                .combo_key
+                .as_ref()
                 .ok_or_else(|| Error::Protocol("Combo key not available".to_string()))?;
 
             let encrypted = hex::decode(response)
@@ -651,7 +688,9 @@ impl AuthMessage {
             if decrypted.len() >= 32 && &decrypted[16..32] == b"SERVER_TO_CLIENT" {
                 Ok(())
             } else {
-                Err(Error::AuthenticationFailed("Invalid server response".to_string()))
+                Err(Error::AuthenticationFailed(
+                    "Invalid server response".to_string(),
+                ))
             }
         } else {
             // No response to verify (older servers may not send this)
@@ -679,6 +718,17 @@ impl AuthMessage {
             hours.abs(),
             minutes
         )
+    }
+
+    fn client_version_string() -> String {
+        let mut parts = env!("CARGO_PKG_VERSION")
+            .split('.')
+            .filter_map(|part| part.parse::<u32>().ok());
+        let major = parts.next().unwrap_or(0);
+        let minor = parts.next().unwrap_or(0);
+        let patch = parts.next().unwrap_or(0);
+        let packed = (major << 24) | (minor << 20) | (patch << 12);
+        packed.to_string()
     }
 
     /// Clear sensitive data
@@ -738,7 +788,10 @@ mod tests {
         assert_eq!(packet[4], PacketType::Data as u8);
 
         // Verify function code
-        assert_eq!(packet[PACKET_HEADER_SIZE + 3], FunctionCode::AuthPhaseOne as u8);
+        assert_eq!(
+            packet[PACKET_HEADER_SIZE + 3],
+            FunctionCode::AuthPhaseOne as u8
+        );
     }
 
     #[test]

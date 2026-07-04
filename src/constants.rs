@@ -408,6 +408,7 @@ pub mod ccap_index {
     pub const TTC4: usize = 40;
     pub const LOB2: usize = 42;
     pub const TTC5: usize = 44;
+    pub const FEATURE_BACKPORT2: usize = 45;
     pub const VECTOR_FEATURES: usize = 52;
     pub const MAX: usize = 53;
 }
@@ -425,6 +426,7 @@ pub mod ccap_value {
     pub const FIELD_VERSION_12_2: u8 = 8;
     pub const FIELD_VERSION_18_1: u8 = 10;
     pub const FIELD_VERSION_19_1: u8 = 12;
+    pub const FIELD_VERSION_19_1_EXT_1: u8 = 13;
     pub const FIELD_VERSION_21_1: u8 = 16;
     pub const FIELD_VERSION_23_1: u8 = 17;
     pub const FIELD_VERSION_23_4: u8 = 24;
@@ -438,6 +440,7 @@ pub mod ccap_value {
 
     pub const CTB_IMPLICIT_POOL: u8 = 0x08;
     pub const CTB_OAUTH_MSG_ON_ERR: u8 = 0x10;
+    pub const END_USER_SEC_CTX_PIGGYBACK: u8 = 0x02;
 
     pub const END_OF_CALL_STATUS: u8 = 0x01;
     pub const IND_RCD: u8 = 0x08;
@@ -569,6 +572,7 @@ pub mod exec_option {
 pub mod exec_flags {
     pub const DML_ROWCOUNTS: u32 = 0x4000;
     pub const IMPLICIT_RESULTSET: u32 = 0x8000;
+    pub const NO_IMPL_REL: u32 = 0x200000;
     pub const NO_CANCEL_ON_EOF: u32 = 0x80;
     pub const SCROLLABLE: u32 = 0x02;
 }
@@ -677,7 +681,11 @@ impl OracleType {
     pub fn is_lob(&self) -> bool {
         matches!(
             self,
-            OracleType::Clob | OracleType::Blob | OracleType::Bfile | OracleType::Json | OracleType::Vector
+            OracleType::Clob
+                | OracleType::Blob
+                | OracleType::Bfile
+                | OracleType::Json
+                | OracleType::Vector
         )
     }
 
@@ -768,6 +776,18 @@ pub enum BindDirection {
 }
 
 impl BindDirection {
+    /// Alias for [`BindDirection::Input`].
+    #[allow(non_upper_case_globals)]
+    pub const In: Self = Self::Input;
+
+    /// Alias for [`BindDirection::Output`].
+    #[allow(non_upper_case_globals)]
+    pub const Out: Self = Self::Output;
+
+    /// Alias for [`BindDirection::InputOutput`].
+    #[allow(non_upper_case_globals)]
+    pub const InOut: Self = Self::InputOutput;
+
     /// Check if this direction includes input (IN or IN OUT)
     pub fn is_input(&self) -> bool {
         matches!(self, BindDirection::Input | BindDirection::InputOutput)
@@ -793,8 +813,9 @@ impl TryFrom<u8> for BindDirection {
     type Error = crate::error::Error;
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
-        BindDirection::from_wire(value)
-            .ok_or_else(|| crate::error::Error::Protocol(format!("Invalid bind direction: {}", value)))
+        BindDirection::from_wire(value).ok_or_else(|| {
+            crate::error::Error::Protocol(format!("Invalid bind direction: {}", value))
+        })
     }
 }
 
@@ -889,8 +910,8 @@ pub mod obj_flags {
     pub const TOID_PREFIX: [u8; 2] = [0x00, 0x22];
     /// Extent OID (16 bytes) - appended to TOID after type OID
     pub const EXTENT_OID: [u8; 16] = [
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00,
+        0x01,
     ];
 }
 
