@@ -23,6 +23,8 @@ pub struct FetchMessage {
     orientation: Option<FetchOrientation>,
     /// Fetch offset/position for scrollable cursors
     offset: i64,
+    /// Sequence number for TTC protocol
+    sequence_number: u8,
 }
 
 impl FetchMessage {
@@ -33,6 +35,7 @@ impl FetchMessage {
             num_rows,
             orientation: None,
             offset: 0,
+            sequence_number: 1,
         }
     }
 
@@ -48,17 +51,28 @@ impl FetchMessage {
             num_rows,
             orientation: Some(orientation),
             offset,
+            sequence_number: 1,
         }
     }
 
     /// Build the fetch request packet
-    pub fn build_request(&self, _caps: &Capabilities) -> Result<Bytes> {
+    pub fn build_request(&self, caps: &Capabilities) -> Result<Bytes> {
+        self.build_request_with_sdu(caps, false)
+    }
+
+    /// Build the fetch request packet with large SDU support.
+    pub fn build_request_with_sdu(&self, caps: &Capabilities, large_sdu: bool) -> Result<Bytes> {
         let mut buf = WriteBuffer::new();
 
         // Write message header
         buf.write_u8(MessageType::Function as u8)?;
         buf.write_u8(FunctionCode::Fetch as u8)?;
-        buf.write_u8(0)?; // Sequence number
+        buf.write_u8(self.sequence_number)?;
+
+        // Token number for pipelining on newer TTC field versions.
+        if caps.ttc_field_version >= 18 {
+            buf.write_ub8(0)?;
+        }
 
         // Write fetch body
         buf.write_ub4(self.cursor_id as u32)?;
@@ -72,13 +86,17 @@ impl FetchMessage {
 
         // Build packet with header
         let payload = buf.freeze();
-        let packet_len = PACKET_HEADER_SIZE + payload.len();
+        let packet_len = PACKET_HEADER_SIZE + 2 + payload.len();
 
         let mut packet = BytesMut::with_capacity(packet_len);
 
         // Packet header
-        packet.put_u16(packet_len as u16); // Length
-        packet.put_u16(0); // Checksum
+        if large_sdu {
+            packet.put_u32(packet_len as u32);
+        } else {
+            packet.put_u16(packet_len as u16); // Length
+            packet.put_u16(0); // Checksum
+        }
         packet.put_u8(PacketType::Data as u8);
         packet.put_u8(0); // Flags
         packet.put_u16(0); // Header checksum
@@ -100,6 +118,11 @@ impl FetchMessage {
     /// Get the number of rows to fetch
     pub fn num_rows(&self) -> u32 {
         self.num_rows
+    }
+
+    /// Set the sequence number for TTC protocol
+    pub fn set_sequence_number(&mut self, seq: u8) {
+        self.sequence_number = seq;
     }
 }
 
@@ -135,6 +158,31 @@ mod tests {
         assert_eq!(packet[10], MessageType::Function as u8);
 
         // Check function code (byte 11) is Fetch (5)
+        assert_eq!(packet[11], FunctionCode::Fetch as u8);
+
+        assert_eq!(
+            u16::from_be_bytes([packet[0], packet[1]]),
+            packet.len() as u16
+        );
+    }
+
+    #[test]
+    fn test_fetch_message_builds_large_sdu_packet() {
+        let msg = FetchMessage::new(1, 100);
+        let caps = Capabilities::new();
+
+        let packet = msg.build_request_with_sdu(&caps, true).unwrap();
+
+        assert_eq!(
+            u32::from_be_bytes([packet[0], packet[1], packet[2], packet[3]]),
+            packet.len() as u32
+        );
+        assert_eq!(packet[4], PacketType::Data as u8);
+        assert_eq!(
+            u16::from_be_bytes([packet[8], packet[9]]),
+            data_flags::END_OF_REQUEST
+        );
+        assert_eq!(packet[10], MessageType::Function as u8);
         assert_eq!(packet[11], FunctionCode::Fetch as u8);
     }
 }

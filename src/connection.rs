@@ -1774,6 +1774,7 @@ impl Connection {
                     match v {
                         Value::String(s) => std::cmp::max(s.len() as u32, 1),
                         Value::Bytes(b) => std::cmp::max(b.len() as u32, 1),
+                        Value::TypedNull(oracle_type) => oracle_type.default_bind_buffer_size(),
                         Value::Integer(_) | Value::Number(_) => 22, // Oracle NUMBER max size
                         Value::Float(_) => 8,                       // BINARY_DOUBLE
                         Value::Boolean(_) => 1,
@@ -2083,23 +2084,32 @@ impl Connection {
         self.ensure_ready().await?;
 
         // Build fetch message
-        let fetch_msg = FetchMessage::new(cursor_id, fetch_size);
+        let mut fetch_msg = FetchMessage::new(cursor_id, fetch_size);
 
         let mut inner = self.inner.lock().await;
-        let request = fetch_msg.build_request(&inner.capabilities)?;
+        let seq_num = inner.next_sequence_number();
+        fetch_msg.set_sequence_number(seq_num);
+        let request = fetch_msg.build_request_with_sdu(&inner.capabilities, inner.large_sdu)?;
         inner.send(&request).await?;
 
         // Receive and parse response
-        let (response, _partial_payload) = inner.receive_response_or_marker().await?;
+        let (mut response, partial_payload) = inner.receive_response_or_marker().await?;
         if response.len() <= PACKET_HEADER_SIZE {
             return Err(Error::Protocol("Empty fetch response".to_string()));
+        }
+
+        let packet_type = response[4];
+        if packet_type == PacketType::Marker as u8 {
+            response = inner
+                .handle_marker_reset_with_partial(partial_payload)
+                .await?;
         }
 
         // Parse row data from response
         let payload = &response[PACKET_HEADER_SIZE..];
         let caps = inner.capabilities.clone();
         drop(inner); // Release lock before parsing
-        self.parse_fetch_response(payload, columns, &caps)
+        self.parse_fetch_response(payload, cursor_id, columns, &caps)
     }
 
     /// Fetch rows from a REF CURSOR
@@ -2204,7 +2214,7 @@ impl Connection {
         let payload = &response[PACKET_HEADER_SIZE..];
         let caps = inner.capabilities.clone();
         drop(inner); // Release lock before parsing
-        self.parse_fetch_response(payload, cursor.columns(), &caps)
+        self.parse_fetch_response(payload, cursor.cursor_id(), cursor.columns(), &caps)
     }
 
     /// Fetch rows from an implicit result set
@@ -2257,6 +2267,7 @@ impl Connection {
     fn parse_fetch_response(
         &self,
         payload: &[u8],
+        cursor_id: u16,
         columns: &[ColumnInfo],
         caps: &Capabilities,
     ) -> Result<QueryResult> {
@@ -2266,7 +2277,8 @@ impl Connection {
 
         let mut buf = ReadBuffer::from_slice(payload);
         let mut rows = Vec::new();
-        let mut has_more_rows = false;
+        let mut has_more_rows = true;
+        let mut response_cursor_id = cursor_id;
 
         // Bit vector for duplicate column optimization
         let mut bit_vector: Option<Vec<u8>> = None;
@@ -2324,8 +2336,9 @@ impl Connection {
                 }
                 x if x == MessageType::Error as u8 => {
                     // Error message contains row count and cursor info
-                    let (error_code, error_msg, more_rows) =
-                        self.parse_error_message_info(&mut buf)?;
+                    let (error_code, error_msg, cid, more_rows) =
+                        self.parse_error_message_info(&mut buf, caps.ttc_field_version)?;
+                    response_cursor_id = cid;
                     has_more_rows = more_rows;
                     if error_code != 0 && error_code != 1403 {
                         // 1403 = no data found
@@ -2355,28 +2368,36 @@ impl Connection {
             rows,
             rows_affected: 0,
             has_more_rows,
-            cursor_id: 0,
+            cursor_id: response_cursor_id,
         })
     }
 
     /// Parse error message info including cursor_id and row counts
-    fn parse_error_message_info(&self, buf: &mut ReadBuffer) -> Result<(u32, String, bool)> {
+    fn parse_error_message_info(
+        &self,
+        buf: &mut ReadBuffer,
+        ttc_field_version: u8,
+    ) -> Result<(u32, String, u16, bool)> {
         let _call_status = buf.read_ub4()?; // end of call status
         buf.skip_ub2()?; // end to end seq#
         buf.skip_ub4()?; // current row number
         buf.skip_ub2()?; // error number
         buf.skip_ub2()?; // array elem error
         buf.skip_ub2()?; // array elem error
-        let _cursor_id = buf.read_ub2()?; // cursor id
+        let cursor_id = buf.read_ub2()?; // cursor id
         let _error_pos = buf.read_sb2()?; // error position
         buf.skip(1)?; // sql type
         buf.skip(1)?; // fatal?
         buf.skip(1)?; // flags
         buf.skip(1)?; // user cursor options
         buf.skip(1)?; // UPI parameter
-        let flags = buf.read_u8()?; // flags
-                                    // Skip rowid - fixed 10 bytes in Oracle format
-        buf.skip(10)?; // rowid is 10 bytes
+        let _warn_flag = buf.read_u8()?; // warning flag
+                                         // Rowid (rba, partition_id, skip 1, block_num, slot_num)
+        buf.skip_ub4()?; // rba
+        buf.skip_ub2()?; // partition_id
+        buf.skip_ub1()?; // skip
+        buf.skip_ub4()?; // block_num
+        buf.skip_ub2()?; // slot_num
         buf.skip_ub4()?; // OS error
         buf.skip(1)?; // statement number
         buf.skip(1)?; // call number
@@ -2407,8 +2428,18 @@ impl Connection {
 
         // Read extended error info
         let error_num = buf.read_ub4()?;
-        let row_count = buf.read_ub8()?;
-        let more_rows = row_count > 0 || (flags & 0x20) != 0;
+        let _row_count = buf.read_ub8()?;
+
+        // Fields added in Oracle Database 20c (TTC field version >= 16).
+        // This connection negotiates modern field versions by default and the
+        // rest of the parser already consumes these fields in the main error
+        // info path. Fetch uses the same structure.
+        if ttc_field_version >= crate::constants::ccap_value::FIELD_VERSION_21_1 {
+            buf.skip_ub4()?; // sql_type
+            buf.skip_ub4()?; // server_checksum
+        }
+
+        let more_rows = error_num != 1403;
 
         // Read error message if present
         let error_msg = if error_num != 0 {
@@ -2417,7 +2448,7 @@ impl Connection {
             String::new()
         };
 
-        Ok((error_num, error_msg, more_rows))
+        Ok((error_num, error_msg, cursor_id, more_rows))
     }
 
     /// Open a scrollable cursor for bidirectional navigation
@@ -2726,7 +2757,7 @@ impl Connection {
         statement: &Statement,
         params: &[Value],
     ) -> Result<QueryResult> {
-        let prefetch_rows = 2; // Match node-oracledb's query execute prefetch
+        let prefetch_rows = QueryOptions::default().prefetch_rows;
 
         // For first execution, check if we might have LOBs (no prefetch for safety)
         // This can be optimized later with describe-only first
@@ -2815,7 +2846,40 @@ impl Connection {
             )?;
         }
 
+        drop(inner);
+        self.fetch_remaining_query_rows(&mut result, prefetch_rows)
+            .await?;
+
         Ok(result)
+    }
+
+    async fn fetch_remaining_query_rows(
+        &self,
+        result: &mut QueryResult,
+        fetch_size: u32,
+    ) -> Result<()> {
+        if result.cursor_id == 0
+            || result.columns.is_empty()
+            || result.rows.len() < fetch_size as usize
+        {
+            result.has_more_rows = false;
+            return Ok(());
+        }
+
+        loop {
+            let next = self
+                .fetch_more(result.cursor_id, &result.columns, fetch_size)
+                .await?;
+            let fetched_rows = next.rows.len();
+            result.rows.extend(next.rows);
+
+            if fetched_rows < fetch_size as usize || !next.has_more_rows {
+                result.has_more_rows = false;
+                break;
+            }
+        }
+
+        Ok(())
     }
 
     /// Internal: Execute a DML statement with optional bind parameters
@@ -2893,6 +2957,7 @@ impl Connection {
         let mut rows: Vec<Row> = Vec::new();
         let mut cursor_id: u16 = 0;
         let mut row_count: u64 = 0;
+        let mut has_more_rows = false;
         let mut end_of_response = false;
 
         // Bit vector for duplicate column optimization
@@ -2940,6 +3005,7 @@ impl Connection {
                         self.parse_error_info_with_rowcount(&mut buf)?;
                     cursor_id = cid;
                     row_count = rc;
+                    has_more_rows = cursor_id != 0 && error_code != 1403;
                     if error_code != 0 && error_code != 1403 {
                         // 1403 is "no data found" which is not an error for queries
                         return Err(Error::OracleError {
@@ -2993,7 +3059,7 @@ impl Connection {
             columns,
             rows,
             rows_affected: row_count,
-            has_more_rows: false,
+            has_more_rows,
             cursor_id,
         })
     }
@@ -3607,10 +3673,22 @@ impl Connection {
             Some(bytes) => {
                 // Decode based on oracle type
                 match col.oracle_type {
-                    OracleType::Number => {
-                        // Oracle NUMBER format - decode to string
+                    OracleType::Number | OracleType::BinaryInteger => {
                         let num = crate::types::decode_oracle_number(&bytes)?;
-                        Ok(Value::String(num.value))
+                        if num.is_integer {
+                            if let Ok(i) = num.to_i64() {
+                                return Ok(Value::Integer(i));
+                            }
+                        }
+                        Ok(Value::Number(num))
+                    }
+                    OracleType::BinaryFloat => {
+                        let value = crate::types::decode_binary_float(&bytes);
+                        Ok(Value::Float(value as f64))
+                    }
+                    OracleType::BinaryDouble => {
+                        let value = crate::types::decode_binary_double(&bytes);
+                        Ok(Value::Float(value))
                     }
                     OracleType::Varchar | OracleType::Char | OracleType::Long => {
                         let s = String::from_utf8_lossy(&bytes).to_string();
@@ -3625,15 +3703,23 @@ impl Connection {
                         let date = crate::types::decode_oracle_date(&bytes)?;
                         Ok(Value::Date(date))
                     }
-                    OracleType::Timestamp | OracleType::TimestampLtz => {
+                    OracleType::Timestamp => {
                         // Oracle TIMESTAMP format - 11 bytes (date + fractional seconds)
                         let ts = crate::types::decode_oracle_timestamp(&bytes)?;
                         Ok(Value::Timestamp(ts))
                     }
-                    OracleType::TimestampTz => {
-                        // Oracle TIMESTAMP WITH TIME ZONE - 13 bytes
-                        let ts = crate::types::decode_oracle_timestamp(&bytes)?;
+                    OracleType::TimestampTz | OracleType::TimestampLtz => {
+                        // Thin protocol returns TZ/LTZ values normalized to UTC.
+                        let ts = crate::types::decode_oracle_timestamp_utc(&bytes)?;
                         Ok(Value::Timestamp(ts))
+                    }
+                    OracleType::IntervalYm => {
+                        let interval = crate::types::decode_oracle_interval_ym(&bytes)?;
+                        Ok(Value::IntervalYM(interval))
+                    }
+                    OracleType::IntervalDs => {
+                        let interval = crate::types::decode_oracle_interval_ds(&bytes)?;
+                        Ok(Value::IntervalDS(interval))
                     }
                     _ => {
                         // Default: return as raw bytes or string
@@ -3884,6 +3970,7 @@ impl Connection {
     /// Parse error info message and extract cursor_id
     /// Format per Python's _process_error_info in base.pyx
     fn parse_error_info(&self, buf: &mut ReadBuffer) -> Result<(u32, Option<String>, u16)> {
+        let packet_bytes = buf.as_bytes().clone();
         // End of call status
         let _call_status = buf.read_ub4()?;
         // End to end seq#
@@ -3974,6 +4061,16 @@ impl Connection {
         } else {
             None
         };
+
+        if error_code != 0
+            && error_msg
+                .as_deref()
+                .is_none_or(|message| !message.contains("ORA-"))
+        {
+            if let Some((code, message)) = Self::extract_oracle_error_text(&packet_bytes) {
+                return Ok((code, Some(message), cursor_id));
+            }
+        }
 
         Ok((error_code, error_msg, cursor_id))
     }
@@ -4069,6 +4166,18 @@ impl Connection {
                 buf.read_string_with_length()?.map(|s| s.trim().to_string())
             } else {
                 None
+            };
+
+            let (error_num, error_msg) = if error_num != 0
+                && error_msg
+                    .as_deref()
+                    .is_none_or(|message| !message.contains("ORA-"))
+            {
+                Self::extract_oracle_error_text(payload)
+                    .map(|(code, message)| (code, Some(message)))
+                    .unwrap_or((error_num, error_msg))
+            } else {
+                (error_num, error_msg)
             };
 
             return Err(Error::OracleError {
@@ -4171,6 +4280,7 @@ impl Connection {
         &self,
         buf: &mut ReadBuffer,
     ) -> Result<(u32, Option<String>, u16, u64)> {
+        let packet_bytes = buf.as_bytes().clone();
         // End of call status
         let _call_status = buf.read_ub4()?;
         // End to end seq#
@@ -4267,7 +4377,37 @@ impl Connection {
             None
         };
 
+        if error_code != 0
+            && error_msg
+                .as_deref()
+                .is_none_or(|message| !message.contains("ORA-"))
+        {
+            if let Some((code, message)) = Self::extract_oracle_error_text(&packet_bytes) {
+                return Ok((code, Some(message), cursor_id, row_count));
+            }
+        }
+
         Ok((error_code, error_msg, cursor_id, row_count))
+    }
+
+    fn extract_oracle_error_text(data: &[u8]) -> Option<(u32, String)> {
+        let start = data.windows(4).position(|window| window == b"ORA-")?;
+        let digits = data.get(start + 4..start + 9)?;
+        if !digits.iter().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        let code = std::str::from_utf8(digits).ok()?.parse().ok()?;
+        let rest = &data[start..];
+        let end = rest
+            .iter()
+            .position(|byte| *byte == b'\n' || *byte == 0x1d || *byte == 0)
+            .unwrap_or(rest.len());
+        let message = String::from_utf8_lossy(&rest[..end]).trim().to_string();
+        if message.is_empty() {
+            None
+        } else {
+            Some((code, message))
+        }
     }
 
     /// Parse describe info from response to extract column metadata
@@ -5821,6 +5961,8 @@ fn bind_oracle_type(value: &Value) -> OracleType {
         Value::Float(_) => OracleType::BinaryDouble,
         Value::Date(_) => OracleType::Date,
         Value::Timestamp(_) => OracleType::Timestamp,
+        Value::IntervalYM(_) => OracleType::IntervalYm,
+        Value::IntervalDS(_) => OracleType::IntervalDs,
         Value::RowId(_) => OracleType::Rowid,
         Value::Boolean(_) => OracleType::Boolean,
         Value::Lob(lob) => match lob {
@@ -5832,11 +5974,13 @@ fn bind_oracle_type(value: &Value) -> OracleType {
         Value::Cursor(_) => OracleType::Cursor,
         Value::Collection(_) => OracleType::Object,
         Value::Null => OracleType::Varchar,
+        Value::TypedNull(oracle_type) => *oracle_type,
     }
 }
 
 fn bind_buffer_size(value: &Value) -> u32 {
     match value {
+        Value::TypedNull(oracle_type) => oracle_type.default_bind_buffer_size(),
         Value::String(s) => (s.len() as u32).max(4000),
         Value::Bytes(bytes) => (bytes.len() as u32).max(4000),
         Value::Integer(_) | Value::Number(_) => 22,
@@ -5844,6 +5988,8 @@ fn bind_buffer_size(value: &Value) -> u32 {
         Value::Boolean(_) => 1,
         Value::Date(_) => 7,
         Value::Timestamp(_) => 13,
+        Value::IntervalYM(_) => 5,
+        Value::IntervalDS(_) => 11,
         Value::RowId(_) => 18,
         Value::Cursor(_) => 0,
         Value::Null => 4000,
@@ -5942,5 +6088,20 @@ mod tests {
 
         let collected: Vec<Row> = result.into_iter().collect();
         assert_eq!(collected.len(), 2);
+    }
+
+    #[test]
+    fn test_typed_null_bind_metadata_helpers() {
+        let number_null = Value::null(OracleType::Number);
+        assert_eq!(bind_oracle_type(&number_null), OracleType::Number);
+        assert_eq!(bind_buffer_size(&number_null), 22);
+
+        let timestamp_null = Value::null(OracleType::Timestamp);
+        assert_eq!(bind_oracle_type(&timestamp_null), OracleType::Timestamp);
+        assert_eq!(bind_buffer_size(&timestamp_null), 13);
+
+        let cursor_null = Value::null(OracleType::Cursor);
+        assert_eq!(bind_oracle_type(&cursor_null), OracleType::Cursor);
+        assert_eq!(bind_buffer_size(&cursor_null), 0);
     }
 }

@@ -11,7 +11,7 @@ use crate::constants::{
     ccap_value, data_flags, exec_flags, exec_option, FunctionCode, MessageType, OracleType,
     PacketType, MAX_LONG_LENGTH, PACKET_HEADER_SIZE,
 };
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::row::Value;
 use crate::statement::Statement;
 
@@ -700,6 +700,24 @@ impl<'a> ExecuteMessage<'a> {
 
         match value {
             Value::Null => (OracleType::Varchar, 1u32, 1u8, 0u64), // Use VARCHAR for NULL
+            Value::TypedNull(oracle_type) => {
+                let csfrm = match oracle_type {
+                    OracleType::Varchar
+                    | OracleType::Char
+                    | OracleType::Long
+                    | OracleType::Clob
+                    | OracleType::Json => 1u8,
+                    _ => 0u8,
+                };
+                let cont_flag = match oracle_type {
+                    OracleType::Clob | OracleType::Blob | OracleType::Json | OracleType::Vector => {
+                        LOB_PREFETCH_FLAG
+                    }
+                    _ => 0u64,
+                };
+                let size = oracle_type.default_bind_buffer_size().max(max_size).max(1);
+                (*oracle_type, size, csfrm, cont_flag)
+            }
             Value::Integer(_) => (OracleType::Number, 22, 0, 0),
             Value::Float(_) => (OracleType::BinaryDouble, 8, 0, 0),
             Value::String(_) => {
@@ -714,6 +732,8 @@ impl<'a> ExecuteMessage<'a> {
             Value::Number(_) => (OracleType::Number, 22, 0, 0),
             Value::Timestamp(_) => (OracleType::Timestamp, 13, 0, 0),
             Value::Date(_) => (OracleType::Date, 7, 0, 0),
+            Value::IntervalYM(_) => (OracleType::IntervalYm, 5, 0, 0),
+            Value::IntervalDS(_) => (OracleType::IntervalDs, 11, 0, 0),
             Value::RowId(_) => (OracleType::Varchar, 18, 1, 0), // ROWID as VARCHAR
             Value::Lob(lob_value) => {
                 // Determine LOB type (CLOB vs BLOB)
@@ -759,7 +779,7 @@ impl<'a> ExecuteMessage<'a> {
         use crate::types::{encode_binary_double, encode_oracle_number};
 
         match value {
-            Value::Null => {
+            Value::Null | Value::TypedNull(_) => {
                 buf.write_u8(0)?; // NULL indicator
             }
             Value::Integer(n) => {
@@ -822,6 +842,11 @@ impl<'a> ExecuteMessage<'a> {
                 let bytes = d.to_oracle_bytes();
                 buf.write_u8(bytes.len() as u8)?;
                 buf.write_bytes(&bytes)?;
+            }
+            Value::IntervalYM(_) | Value::IntervalDS(_) => {
+                return Err(Error::Protocol(
+                    "INTERVAL input binds are not implemented yet".to_string(),
+                ));
             }
             Value::RowId(r) => {
                 // Write ROWID as string

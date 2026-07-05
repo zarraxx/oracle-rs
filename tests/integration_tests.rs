@@ -403,6 +403,49 @@ mod data_type_tests {
 
     #[tokio::test]
     #[ignore = "requires Oracle database"]
+    async fn test_timestamp_tz_and_ltz_are_decoded_as_server_utc_values() {
+        use oracle_rs::Value;
+
+        let conn = connect().await.expect("Failed to connect");
+
+        conn.execute("ALTER SESSION SET TIME_ZONE = 'Asia/Kolkata'", &[])
+            .await
+            .expect("ALTER SESSION TIME_ZONE failed");
+
+        let result = conn
+            .query(
+                "SELECT \
+                   CAST(TIMESTAMP '2002-08-01 00:00:00' AT TIME ZONE 'UTC' AS TIMESTAMP WITH LOCAL TIME ZONE) AS ltz, \
+                   TO_TIMESTAMP_TZ('2009-01-26 15:02:54.893532 -08:00', 'YYYY-MM-DD HH24:MI:SS.FF6 TZH:TZM') AS tzt \
+                 FROM dual",
+                &[],
+            )
+            .await
+            .expect("TIMESTAMP TZ/LTZ query failed");
+
+        let row = &result.rows[0];
+        let ltz = match row.get(0) {
+            Some(Value::Timestamp(ts)) => *ts,
+            other => panic!("Expected LTZ timestamp, got {:?}", other),
+        };
+        assert_eq!((ltz.year, ltz.month, ltz.day), (2002, 7, 31));
+        assert_eq!((ltz.hour, ltz.minute, ltz.second), (18, 30, 0));
+        assert!(!ltz.has_timezone());
+
+        let tzt = match row.get(1) {
+            Some(Value::Timestamp(ts)) => *ts,
+            other => panic!("Expected TZ timestamp, got {:?}", other),
+        };
+        assert_eq!((tzt.year, tzt.month, tzt.day), (2009, 1, 26));
+        assert_eq!((tzt.hour, tzt.minute, tzt.second), (23, 2, 54));
+        assert_eq!(tzt.microsecond, 893532);
+        assert!(!tzt.has_timezone());
+
+        conn.close().await.expect("Failed to close");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Oracle database"]
     async fn test_clob_data_type() {
         use oracle_rs::Value;
 
@@ -1664,6 +1707,13 @@ mod error_handling_tests {
             invalid_identifier.is_err(),
             "Expected invalid identifier error"
         );
+        let invalid_identifier_message = invalid_identifier.unwrap_err().to_string();
+        assert!(
+            invalid_identifier_message.contains("ORA-00904")
+                && invalid_identifier_message.contains("\"Y\"")
+                && invalid_identifier_message.contains("invalid identifier"),
+            "Expected full invalid identifier message, got: {invalid_identifier_message}"
+        );
 
         let after_bad_execute = conn
             .query("SELECT 1 + 1 AS after_bad_execute FROM dual", &[])
@@ -2097,7 +2147,7 @@ mod bind_parameter_tests {
 
 mod batch_execution_tests {
     use super::*;
-    use oracle_rs::BatchBuilder;
+    use oracle_rs::{BatchBuilder, OracleType, Value};
 
     #[tokio::test]
     #[ignore = "requires Oracle database"]
@@ -2200,6 +2250,60 @@ mod batch_execution_tests {
         assert_eq!(counts[0], 1);
         assert_eq!(counts[1], 1);
         assert_eq!(counts[2], 1);
+
+        conn.rollback().await.expect("Failed to rollback");
+        conn.close().await.expect("Failed to close");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Oracle database"]
+    async fn test_batch_with_typed_null_inputs() {
+        let conn = connect().await.expect("Failed to connect");
+
+        conn.execute(
+            "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE batch_typed_null_test (id NUMBER, amount NUMBER, note VARCHAR2(100))'; EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;",
+            &[]
+        ).await.expect("Failed to create table");
+
+        conn.execute("DELETE FROM batch_typed_null_test WHERE id >= 4100", &[])
+            .await
+            .ok();
+
+        let batch = BatchBuilder::new(
+            "INSERT INTO batch_typed_null_test (id, amount, note) VALUES (:1, :2, :3)",
+        )
+        .add_row(vec![
+            4101i64.into(),
+            Value::null(OracleType::Number),
+            "number null".into(),
+        ])
+        .add_row(vec![
+            4102i64.into(),
+            99i64.into(),
+            Value::null(OracleType::Varchar),
+        ])
+        .build();
+
+        let result = conn
+            .execute_batch(&batch)
+            .await
+            .expect("Batch insert with typed NULL inputs failed");
+
+        assert_eq!(result.success_count, 2);
+
+        let query_result = conn
+            .query(
+                "SELECT id, amount, note FROM batch_typed_null_test WHERE id >= 4101 ORDER BY id",
+                &[],
+            )
+            .await
+            .expect("Select failed");
+
+        assert_eq!(query_result.row_count(), 2);
+        assert!(query_result.rows[0].is_null(1), "amount should be NULL");
+        assert_eq!(query_result.rows[0].get_string(2), Some("number null"));
+        assert_eq!(query_result.rows[1].get_i64(1), Some(99));
+        assert!(query_result.rows[1].is_null(2), "note should be NULL");
 
         conn.rollback().await.expect("Failed to rollback");
         conn.close().await.expect("Failed to close");
@@ -3760,6 +3864,149 @@ mod plsql_tests {
 
         assert_eq!(name.as_str(), Some("Alan Turing!"));
         assert_eq!(suffix.as_str(), Some("!"));
+
+        conn.close().await.expect("Failed to close");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Oracle database"]
+    async fn test_execute_with_binds_typed_null_out_scalars() {
+        let conn = connect().await.expect("Failed to connect");
+
+        let mut out_integer = Value::null(OracleType::Number);
+        let mut out_number = Value::null(OracleType::Number);
+        let mut out_date = Value::null(OracleType::Date);
+        let mut out_timestamp = Value::null(OracleType::Timestamp);
+        let mut out_raw = Value::null(OracleType::Raw);
+
+        conn.execute_with_binds(
+            "BEGIN
+                :out_integer := 42;
+                :out_number := 42.5;
+                :out_date := DATE '2024-03-15';
+                :out_timestamp := TIMESTAMP '2024-03-15 12:34:56.123456';
+                :out_raw := HEXTORAW('DEADBEEF');
+             END;",
+            &mut [
+                ("out_integer", &mut out_integer, BindDirection::Out),
+                ("out_number", &mut out_number, BindDirection::Out),
+                ("out_date", &mut out_date, BindDirection::Out),
+                ("out_timestamp", &mut out_timestamp, BindDirection::Out),
+                ("out_raw", &mut out_raw, BindDirection::Out),
+            ],
+        )
+        .await
+        .expect("typed NULL OUT bind execution failed");
+
+        assert_eq!(out_integer.as_i64(), Some(42));
+        assert!(
+            matches!(out_integer, Value::Integer(42)),
+            "NUMBER integer OUT should decode directly as Integer, got {:?}",
+            out_integer
+        );
+        assert_eq!(out_number.as_f64(), Some(42.5));
+        assert!(
+            matches!(out_number, Value::Number(_)),
+            "NUMBER decimal OUT should decode directly as Number, got {:?}",
+            out_number
+        );
+
+        let date = out_date.as_date().expect("DATE OUT value");
+        assert_eq!((date.year, date.month, date.day), (2024, 3, 15));
+
+        let timestamp = out_timestamp.as_timestamp().expect("TIMESTAMP OUT value");
+        assert_eq!(
+            (
+                timestamp.year,
+                timestamp.month,
+                timestamp.day,
+                timestamp.hour,
+                timestamp.minute,
+                timestamp.second,
+                timestamp.microsecond,
+            ),
+            (2024, 3, 15, 12, 34, 56, 123456)
+        );
+
+        assert_eq!(out_raw.as_bytes(), Some(&[0xDE, 0xAD, 0xBE, 0xEF][..]));
+
+        conn.close().await.expect("Failed to close");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Oracle database"]
+    async fn test_execute_with_binds_typed_null_out_lobs() {
+        let conn = connect().await.expect("Failed to connect");
+
+        let mut out_clob = Value::null(OracleType::Clob);
+        let mut out_blob = Value::null(OracleType::Blob);
+
+        conn.execute_with_binds(
+            "BEGIN
+                :out_clob := TO_CLOB('typed CLOB OUT');
+                :out_blob := TO_BLOB(HEXTORAW('DEADBEEF'));
+             END;",
+            &mut [
+                ("out_clob", &mut out_clob, BindDirection::Out),
+                ("out_blob", &mut out_blob, BindDirection::Out),
+            ],
+        )
+        .await
+        .expect("typed NULL LOB OUT bind execution failed");
+
+        match &out_clob {
+            Value::Lob(lob) => {
+                let locator = lob.as_locator().expect("Expected CLOB locator");
+                let text = conn.read_clob(locator).await.expect("Failed to read CLOB");
+                assert_eq!(text, "typed CLOB OUT");
+            }
+            other => panic!("Expected CLOB locator OUT value, got {:?}", other),
+        }
+
+        match &out_blob {
+            Value::Lob(lob) => {
+                let locator = lob.as_locator().expect("Expected BLOB locator");
+                let bytes = conn.read_blob(locator).await.expect("Failed to read BLOB");
+                assert_eq!(&bytes[..], &[0xDE, 0xAD, 0xBE, 0xEF]);
+            }
+            other => panic!("Expected BLOB locator OUT value, got {:?}", other),
+        }
+
+        conn.close().await.expect("Failed to close");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Oracle database"]
+    async fn test_execute_with_binds_typed_null_out_ref_cursor() {
+        let conn = connect().await.expect("Failed to connect");
+
+        let mut cursor = Value::null(OracleType::Cursor);
+
+        conn.execute_with_binds(
+            "BEGIN
+                OPEN :cursor FOR
+                    SELECT 1 AS id, 'Ada' AS name FROM dual
+                    UNION ALL
+                    SELECT 2 AS id, 'Grace' AS name FROM dual
+                    ORDER BY id;
+             END;",
+            &mut [("cursor", &mut cursor, BindDirection::Out)],
+        )
+        .await
+        .expect("typed NULL REF CURSOR OUT bind execution failed");
+
+        let cursor = cursor.as_cursor().expect("REF CURSOR OUT value");
+        assert_eq!(cursor.column_count(), 2);
+
+        let rows = conn
+            .fetch_cursor(cursor)
+            .await
+            .expect("Failed to fetch cursor");
+        assert_eq!(rows.row_count(), 2);
+        assert_eq!(rows.rows[0].get(0).and_then(Value::as_i64), Some(1));
+        assert_eq!(rows.rows[0].get(1).and_then(Value::as_str), Some("Ada"));
+        assert_eq!(rows.rows[1].get(0).and_then(Value::as_i64), Some(2));
+        assert_eq!(rows.rows[1].get(1).and_then(Value::as_str), Some("Grace"));
 
         conn.close().await.expect("Failed to close");
     }
@@ -5796,6 +6043,41 @@ mod statement_cache_reuse_tests {
             .expect("Third query failed");
         assert_eq!(r3.row_count(), 2);
         assert_eq!(r3.rows[0].get_string(1), Some("John"));
+
+        conn.close().await.expect("Failed to close");
+    }
+}
+
+mod fetch_boundary_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires Oracle database"]
+    async fn test_query_fetches_past_default_prefetch_boundary() {
+        let conn = connect().await.expect("Failed to connect");
+
+        let rows = conn
+            .query("SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 105", &[])
+            .await
+            .expect("Query should fetch past the first prefetch batch");
+
+        assert_eq!(
+            rows.row_count(),
+            105,
+            "cursor_id={}, has_more_rows={}",
+            rows.cursor_id,
+            rows.has_more_rows
+        );
+        assert_eq!(rows.rows[0].get_i64(0), Some(1));
+        assert_eq!(rows.rows[104].get_i64(0), Some(105));
+
+        let rows = conn
+            .query("SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 205", &[])
+            .await
+            .expect("Query should fetch multiple continuation batches");
+
+        assert_eq!(rows.row_count(), 205);
+        assert_eq!(rows.rows[204].get_i64(0), Some(205));
 
         conn.close().await.expect("Failed to close");
     }

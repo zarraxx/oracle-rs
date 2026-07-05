@@ -286,6 +286,19 @@ pub fn decode_oracle_timestamp(data: &[u8]) -> Result<OracleTimestamp> {
     })
 }
 
+/// Decode a server-normalized timestamp value as UTC.
+///
+/// Oracle's thin protocol returns TIMESTAMP WITH TIME ZONE and TIMESTAMP WITH
+/// LOCAL TIME ZONE values normalized to UTC for node-oracledb thin. Any trailing
+/// timezone bytes in the wire value are not a local wall-clock representation,
+/// so callers should not combine them with the normalized date/time fields.
+pub fn decode_oracle_timestamp_utc(data: &[u8]) -> Result<OracleTimestamp> {
+    let mut ts = decode_oracle_timestamp(data)?;
+    ts.tz_hour_offset = 0;
+    ts.tz_minute_offset = 0;
+    Ok(ts)
+}
+
 /// Encode an Oracle DATE to wire format (7 bytes)
 pub fn encode_oracle_date(date: &OracleDate) -> Vec<u8> {
     let century = (date.year / 100) as u8 + 100;

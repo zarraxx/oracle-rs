@@ -348,7 +348,7 @@ fn decode_value(buf: &mut ReadBuffer, oracle_type: OracleType) -> Result<Value> 
 /// Encode a single value to the buffer
 fn encode_value(buf: &mut WriteBuffer, value: &Value, oracle_type: OracleType) -> Result<()> {
     match value {
-        Value::Null => {
+        Value::Null | Value::TypedNull(_) => {
             buf.write_u8(NULL_LENGTH_INDICATOR)?;
         }
         Value::String(s) => {
@@ -415,6 +415,8 @@ fn encode_value(buf: &mut WriteBuffer, value: &Value, oracle_type: OracleType) -
         }
         // Complex types not yet supported in collections
         Value::RowId(_)
+        | Value::IntervalYM(_)
+        | Value::IntervalDS(_)
         | Value::Lob(_)
         | Value::Json(_)
         | Value::Vector(_)

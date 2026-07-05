@@ -12,8 +12,9 @@ use crate::error::{Error, Result};
 use crate::statement::ColumnInfo;
 use crate::types::{
     decode_binary_double, decode_binary_float, decode_oracle_date, decode_oracle_number,
-    decode_oracle_timestamp, decode_rowid, LobValue, OracleDate, OracleNumber, OracleTimestamp,
-    OracleVector, RefCursor, RowId,
+    decode_oracle_timestamp, decode_oracle_timestamp_utc, decode_rowid, LobValue, OracleDate,
+    OracleIntervalDS, OracleIntervalYM, OracleNumber, OracleTimestamp, OracleVector, RefCursor,
+    RowId,
 };
 
 /// Represents a value from an Oracle column.
@@ -53,6 +54,8 @@ use crate::types::{
 pub enum Value {
     /// NULL value
     Null,
+    /// NULL value with an explicit Oracle type for bind metadata.
+    TypedNull(OracleType),
     /// String value (VARCHAR2, CHAR, CLOB as string)
     String(String),
     /// Byte array (RAW, BLOB as bytes)
@@ -71,6 +74,10 @@ pub enum Value {
     RowId(RowId),
     /// Boolean value
     Boolean(bool),
+    /// INTERVAL YEAR TO MONTH value
+    IntervalYM(OracleIntervalYM),
+    /// INTERVAL DAY TO SECOND value
+    IntervalDS(OracleIntervalDS),
     /// LOB value (CLOB, BLOB, BFILE)
     Lob(LobValue),
     /// JSON value (Oracle 21c+, stored as OSON binary format)
@@ -86,9 +93,22 @@ pub enum Value {
 }
 
 impl Value {
+    /// Create a NULL value that keeps its intended Oracle type for binds.
+    pub fn null(oracle_type: OracleType) -> Self {
+        Value::TypedNull(oracle_type)
+    }
+
+    /// Return the explicit Oracle type for a typed NULL value.
+    pub fn null_type(&self) -> Option<OracleType> {
+        match self {
+            Value::TypedNull(oracle_type) => Some(*oracle_type),
+            _ => None,
+        }
+    }
+
     /// Check if this value is NULL
     pub fn is_null(&self) -> bool {
-        matches!(self, Value::Null)
+        matches!(self, Value::Null | Value::TypedNull(_))
     }
 
     /// Try to get as a string reference
@@ -102,6 +122,7 @@ impl Value {
     /// Try to get as an integer
     pub fn as_i64(&self) -> Option<i64> {
         match self {
+            Value::String(s) => s.parse().ok(),
             Value::Integer(i) => Some(*i),
             Value::Float(f) => Some(*f as i64),
             Value::Number(n) => n.to_i64().ok(),
@@ -112,6 +133,7 @@ impl Value {
     /// Try to get as a float
     pub fn as_f64(&self) -> Option<f64> {
         match self {
+            Value::String(s) => s.parse().ok(),
             Value::Float(f) => Some(*f),
             Value::Integer(i) => Some(*i as f64),
             Value::Number(n) => n.to_f64().ok(),
@@ -133,6 +155,22 @@ impl Value {
         match self {
             Value::Boolean(b) => Some(*b),
             Value::Integer(i) => Some(*i != 0),
+            _ => None,
+        }
+    }
+
+    /// Try to get as an INTERVAL YEAR TO MONTH value.
+    pub fn as_interval_ym(&self) -> Option<&OracleIntervalYM> {
+        match self {
+            Value::IntervalYM(interval) => Some(interval),
+            _ => None,
+        }
+    }
+
+    /// Try to get as an INTERVAL DAY TO SECOND value.
+    pub fn as_interval_ds(&self) -> Option<&OracleIntervalDS> {
+        match self {
+            Value::IntervalDS(interval) => Some(interval),
             _ => None,
         }
     }
@@ -255,10 +293,106 @@ impl From<DbObject> for Value {
     }
 }
 
+impl TryFrom<Value> for String {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::String(s) => Ok(s),
+            Value::Number(n) => Ok(n.as_str().to_string()),
+            Value::Integer(i) => Ok(i.to_string()),
+            Value::Float(f) => Ok(f.to_string()),
+            Value::IntervalYM(interval) => Ok(interval.to_string()),
+            Value::IntervalDS(interval) => Ok(interval.to_string()),
+            Value::Null | Value::TypedNull(_) => Err(Error::DataConversionError(
+                "Cannot convert NULL to String".to_string(),
+            )),
+            other => Err(Error::DataConversionError(format!(
+                "Cannot convert {:?} to String",
+                other
+            ))),
+        }
+    }
+}
+
+impl TryFrom<Value> for i64 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        value
+            .as_i64()
+            .ok_or_else(|| Error::DataConversionError(format!("Cannot convert {:?} to i64", value)))
+    }
+}
+
+impl TryFrom<Value> for f64 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        value
+            .as_f64()
+            .ok_or_else(|| Error::DataConversionError(format!("Cannot convert {:?} to f64", value)))
+    }
+}
+
+impl TryFrom<Value> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::Bytes(bytes) => Ok(bytes),
+            Value::String(s) => Ok(s.into_bytes()),
+            Value::Null | Value::TypedNull(_) => Err(Error::DataConversionError(
+                "Cannot convert NULL to bytes".to_string(),
+            )),
+            other => Err(Error::DataConversionError(format!(
+                "Cannot convert {:?} to bytes",
+                other
+            ))),
+        }
+    }
+}
+
+impl TryFrom<Value> for OracleDate {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::Date(date) => Ok(date),
+            Value::Timestamp(timestamp) => Ok(timestamp.to_date()),
+            Value::Null | Value::TypedNull(_) => Err(Error::DataConversionError(
+                "Cannot convert NULL to OracleDate".to_string(),
+            )),
+            other => Err(Error::DataConversionError(format!(
+                "Cannot convert {:?} to OracleDate",
+                other
+            ))),
+        }
+    }
+}
+
+impl TryFrom<Value> for OracleTimestamp {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self> {
+        match value {
+            Value::Timestamp(timestamp) => Ok(timestamp),
+            Value::Date(date) => Ok(date.into()),
+            Value::Null | Value::TypedNull(_) => Err(Error::DataConversionError(
+                "Cannot convert NULL to OracleTimestamp".to_string(),
+            )),
+            other => Err(Error::DataConversionError(format!(
+                "Cannot convert {:?} to OracleTimestamp",
+                other
+            ))),
+        }
+    }
+}
+
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::Null => write!(f, "NULL"),
+            Value::Null | Value::TypedNull(_) => write!(f, "NULL"),
             Value::String(s) => write!(f, "{}", s),
             Value::Bytes(b) => write!(f, "<{} bytes>", b.len()),
             Value::Integer(i) => write!(f, "{}", i),
@@ -282,6 +416,8 @@ impl std::fmt::Display for Value {
             }
             Value::RowId(r) => write!(f, "{}", r),
             Value::Boolean(b) => write!(f, "{}", b),
+            Value::IntervalYM(interval) => write!(f, "{}", interval),
+            Value::IntervalDS(interval) => write!(f, "{}", interval),
             Value::Lob(lob) => match lob {
                 LobValue::Null => write!(f, "NULL"),
                 LobValue::Empty => write!(f, "<empty LOB>"),
@@ -510,11 +646,13 @@ impl<'a> RowDataDecoder<'a> {
             OracleType::Varchar | OracleType::Char | OracleType::Long => self.decode_string(buf),
             OracleType::Number | OracleType::BinaryInteger => self.decode_number(buf),
             OracleType::Date => self.decode_date(buf),
-            OracleType::Timestamp | OracleType::TimestampLtz => self.decode_timestamp(buf, false),
-            OracleType::TimestampTz => self.decode_timestamp(buf, true),
+            OracleType::Timestamp => self.decode_timestamp(buf, false),
+            OracleType::TimestampTz | OracleType::TimestampLtz => self.decode_timestamp(buf, true),
             OracleType::Raw | OracleType::LongRaw => self.decode_raw(buf),
             OracleType::BinaryFloat => self.decode_binary_float(buf),
             OracleType::BinaryDouble => self.decode_binary_double(buf),
+            OracleType::IntervalYm => self.decode_interval_ym(buf),
+            OracleType::IntervalDs => self.decode_interval_ds(buf),
             OracleType::Rowid => self.decode_rowid(buf),
             OracleType::Urowid => self.decode_urowid(buf),
             OracleType::Boolean => self.decode_boolean(buf),
@@ -615,7 +753,11 @@ impl<'a> RowDataDecoder<'a> {
         match self.read_oracle_slice(buf)? {
             None => Ok(Value::Null),
             Some(data) => {
-                let ts = decode_oracle_timestamp(&data)?;
+                let ts = if _with_tz {
+                    decode_oracle_timestamp_utc(&data)?
+                } else {
+                    decode_oracle_timestamp(&data)?
+                };
                 Ok(Value::Timestamp(ts))
             }
         }
@@ -647,6 +789,28 @@ impl<'a> RowDataDecoder<'a> {
             Some(data) => {
                 let f = decode_binary_double(&data);
                 Ok(Value::Float(f))
+            }
+        }
+    }
+
+    /// Decode an INTERVAL YEAR TO MONTH value.
+    fn decode_interval_ym(&self, buf: &mut ReadBuffer) -> Result<Value> {
+        match self.read_oracle_slice(buf)? {
+            None => Ok(Value::Null),
+            Some(data) => {
+                let interval = crate::types::decode_oracle_interval_ym(&data)?;
+                Ok(Value::IntervalYM(interval))
+            }
+        }
+    }
+
+    /// Decode an INTERVAL DAY TO SECOND value.
+    fn decode_interval_ds(&self, buf: &mut ReadBuffer) -> Result<Value> {
+        match self.read_oracle_slice(buf)? {
+            None => Ok(Value::Null),
+            Some(data) => {
+                let interval = crate::types::decode_oracle_interval_ds(&data)?;
+                Ok(Value::IntervalDS(interval))
             }
         }
     }
@@ -765,11 +929,31 @@ mod tests {
     }
 
     #[test]
+    fn test_value_typed_null_keeps_oracle_type() {
+        let v = Value::null(OracleType::Number);
+        assert!(v.is_null());
+        assert_eq!(v.null_type(), Some(OracleType::Number));
+        assert!(v.as_i64().is_none());
+        assert_eq!(format!("{}", v), "NULL");
+    }
+
+    #[test]
     fn test_value_string() {
         let v = Value::String("hello".to_string());
         assert!(!v.is_null());
         assert_eq!(v.as_str(), Some("hello"));
         assert_eq!(format!("{}", v), "hello");
+    }
+
+    #[test]
+    fn test_numeric_string_conversions() {
+        let v = Value::String("42.5".to_string());
+        assert_eq!(v.as_f64(), Some(42.5));
+        assert_eq!(f64::try_from(v).unwrap(), 42.5);
+
+        let v = Value::String("42".to_string());
+        assert_eq!(v.as_i64(), Some(42));
+        assert_eq!(i64::try_from(v).unwrap(), 42);
     }
 
     #[test]

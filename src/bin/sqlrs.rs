@@ -297,6 +297,7 @@ impl SqlRs {
                         out_idx += 1;
                     }
                 }
+                self.drain_dbms_output().await?;
                 if self.feedback {
                     println!();
                     println!("PL/SQL procedure successfully completed.");
@@ -358,6 +359,7 @@ impl SqlRs {
                 Ok(())
             }
             Ok(Execution::Plsql) => {
+                self.drain_dbms_output().await?;
                 if self.feedback {
                     println!();
                     println!("PL/SQL procedure successfully completed.");
@@ -405,6 +407,43 @@ impl SqlRs {
             }
         }
         Ok(result)
+    }
+
+    async fn drain_dbms_output(&mut self) -> Result<(), String> {
+        if !self.serveroutput {
+            return Ok(());
+        }
+
+        loop {
+            let result = self
+                .conn
+                .execute_plsql(
+                    "BEGIN DBMS_OUTPUT.GET_LINE(:line, :status); END;",
+                    &[
+                        BindParam::output(OracleType::Varchar, 32767),
+                        BindParam::output(OracleType::Number, 22),
+                    ],
+                )
+                .await
+                .map_err(|err| err.to_string())?;
+
+            let status = result
+                .out_values
+                .get(1)
+                .and_then(Value::as_i64)
+                .unwrap_or(1);
+            if status != 0 {
+                break;
+            }
+
+            if let Some(line) = result.out_values.first().and_then(Value::as_str) {
+                println!("{line}");
+            } else {
+                println!();
+            }
+        }
+
+        Ok(())
     }
 
     fn bind_values_for_sql(&self, sql: &str) -> Vec<Value> {

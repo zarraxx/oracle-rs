@@ -696,6 +696,27 @@ impl OracleType {
             OracleType::Clob | OracleType::Blob | OracleType::Json | OracleType::Vector
         )
     }
+
+    /// Default bind buffer size for this type when the value itself is NULL.
+    pub fn default_bind_buffer_size(&self) -> u32 {
+        match self {
+            OracleType::Varchar | OracleType::Char => 4000,
+            OracleType::Long => 32767,
+            OracleType::Number | OracleType::BinaryInteger => 22,
+            OracleType::BinaryFloat => 4,
+            OracleType::BinaryDouble => 8,
+            OracleType::Date => 7,
+            OracleType::Timestamp | OracleType::TimestampTz | OracleType::TimestampLtz => 13,
+            OracleType::Raw | OracleType::LongRaw => 4000,
+            OracleType::Rowid | OracleType::Urowid => 18,
+            OracleType::Boolean => 1,
+            OracleType::Cursor | OracleType::Object => 0,
+            OracleType::Clob | OracleType::Blob | OracleType::Bfile => 112,
+            OracleType::Json | OracleType::Vector => 100,
+            OracleType::IntervalYm => 5,
+            OracleType::IntervalDs => 11,
+        }
+    }
 }
 
 impl TryFrom<u8> for OracleType {

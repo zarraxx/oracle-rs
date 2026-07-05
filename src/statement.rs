@@ -233,15 +233,15 @@ impl BindParam {
             }
             OracleType::Number | OracleType::BinaryInteger => Value::Integer(0),
             OracleType::BinaryDouble | OracleType::BinaryFloat => Value::Float(0.0),
-            OracleType::Date => Value::Null,
+            OracleType::Date => Value::null(OracleType::Date),
             OracleType::Timestamp | OracleType::TimestampTz | OracleType::TimestampLtz => {
-                Value::Null
+                Value::null(self.oracle_type)
             }
             OracleType::Raw | OracleType::LongRaw => Value::Bytes(Vec::new()),
-            OracleType::Clob | OracleType::Blob => Value::Null,
+            OracleType::Clob | OracleType::Blob => Value::null(self.oracle_type),
             OracleType::Cursor => Value::Cursor(RefCursor::new(0, vec![])),
             OracleType::Boolean => Value::Boolean(false),
-            _ => Value::Null,
+            _ => Value::null(self.oracle_type),
         }
     }
 
@@ -249,6 +249,7 @@ impl BindParam {
     fn infer_oracle_type(value: &Value) -> OracleType {
         match value {
             Value::Null => OracleType::Varchar, // Default to VARCHAR for NULL
+            Value::TypedNull(oracle_type) => *oracle_type,
             Value::String(_) => OracleType::Varchar,
             Value::Bytes(_) => OracleType::Raw,
             Value::Integer(_) => OracleType::Number,
@@ -256,6 +257,8 @@ impl BindParam {
             Value::Number(_) => OracleType::Number,
             Value::Date(_) => OracleType::Date,
             Value::Timestamp(_) => OracleType::Timestamp,
+            Value::IntervalYM(_) => OracleType::IntervalYm,
+            Value::IntervalDS(_) => OracleType::IntervalDs,
             Value::RowId(_) => OracleType::Rowid,
             Value::Boolean(_) => OracleType::Boolean,
             Value::Lob(_) => OracleType::Clob, // Default to CLOB

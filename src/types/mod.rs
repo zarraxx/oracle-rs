@@ -6,6 +6,7 @@
 mod binary;
 mod cursor;
 mod date;
+mod interval;
 mod lob;
 mod number;
 mod oson;
@@ -18,8 +19,11 @@ pub use binary::{
 };
 pub use cursor::RefCursor;
 pub use date::{
-    decode_oracle_date, decode_oracle_timestamp, encode_oracle_date, encode_oracle_timestamp,
-    OracleDate, OracleTimestamp,
+    decode_oracle_date, decode_oracle_timestamp, decode_oracle_timestamp_utc, encode_oracle_date,
+    encode_oracle_timestamp, OracleDate, OracleTimestamp,
+};
+pub use interval::{
+    decode_oracle_interval_ds, decode_oracle_interval_ym, OracleIntervalDS, OracleIntervalYM,
 };
 pub use lob::{LobData, LobLocator, LobValue};
 pub use number::{decode_oracle_number, encode_oracle_number, OracleNumber};
