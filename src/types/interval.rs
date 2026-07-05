@@ -135,11 +135,34 @@ pub fn decode_oracle_interval_ds(data: &[u8]) -> Result<OracleIntervalDS> {
     ))
 }
 
+/// Encode an Oracle INTERVAL YEAR TO MONTH value.
+pub fn encode_oracle_interval_ym(interval: &OracleIntervalYM) -> [u8; 5] {
+    let mut out = [0u8; 5];
+    out[0..4].copy_from_slice(&write_excess_i32(interval.years));
+    out[4] = (interval.months + DURATION_OFFSET) as u8;
+    out
+}
+
+/// Encode an Oracle INTERVAL DAY TO SECOND value.
+pub fn encode_oracle_interval_ds(interval: &OracleIntervalDS) -> [u8; 11] {
+    let mut out = [0u8; 11];
+    out[0..4].copy_from_slice(&write_excess_i32(interval.days));
+    out[4] = (interval.hours + DURATION_OFFSET) as u8;
+    out[5] = (interval.minutes + DURATION_OFFSET) as u8;
+    out[6] = (interval.seconds + DURATION_OFFSET) as u8;
+    out[7..11].copy_from_slice(&write_excess_i32(interval.fseconds));
+    out
+}
+
 fn read_excess_i32(data: &[u8]) -> Result<i32> {
     let bytes: [u8; 4] = data
         .try_into()
         .map_err(|_| Error::DataConversionError("Expected 4 bytes".to_string()))?;
     Ok((u32::from_be_bytes(bytes) as i64 - DURATION_MID) as i32)
+}
+
+fn write_excess_i32(value: i32) -> [u8; 4] {
+    ((value as i64 + DURATION_MID) as u32).to_be_bytes()
 }
 
 #[cfg(test)]
@@ -152,6 +175,7 @@ mod tests {
         let interval = decode_oracle_interval_ym(&data).unwrap();
         assert_eq!(interval, OracleIntervalYM::new(10, 2));
         assert_eq!(interval.to_string(), "+10-02");
+        assert_eq!(encode_oracle_interval_ym(&interval), data);
     }
 
     #[test]
@@ -162,5 +186,21 @@ mod tests {
         let interval = decode_oracle_interval_ds(&data).unwrap();
         assert_eq!(interval, OracleIntervalDS::new(11, 10, 9, 8, 555_000_000));
         assert_eq!(interval.to_string(), "+11 10:09:08.555000000");
+        assert_eq!(encode_oracle_interval_ds(&interval), data);
+    }
+
+    #[test]
+    fn test_encode_negative_intervals() {
+        let ym = OracleIntervalYM::new(-2, -6);
+        assert_eq!(
+            decode_oracle_interval_ym(&encode_oracle_interval_ym(&ym)).unwrap(),
+            ym
+        );
+
+        let ds = OracleIntervalDS::new(-2, -12, -30, 0, 0);
+        assert_eq!(
+            decode_oracle_interval_ds(&encode_oracle_interval_ds(&ds)).unwrap(),
+            ds
+        );
     }
 }

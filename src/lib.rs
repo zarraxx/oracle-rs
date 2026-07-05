@@ -226,7 +226,7 @@ pub use batch::{BatchBinds, BatchBuilder, BatchError, BatchOptions, BatchResult}
 pub use capabilities::Capabilities;
 pub use config::{Config, TlsMode};
 pub use connection::{
-    Connection, ConnectionState, PlsqlResult, QueryOptions, QueryResult, ServerInfo,
+    Connection, ConnectionState, PlsqlResult, QueryOptions, QueryResult, ServerInfo, SessionState,
 };
 pub use constants::FetchOrientation;
 pub use constants::{BindDirection, OracleType};

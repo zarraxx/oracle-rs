@@ -26,13 +26,14 @@
 //! }
 //! ```
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 
-use crate::batch::{BatchBinds, BatchResult};
+use crate::batch::{BatchBinds, BatchError, BatchResult};
 use crate::buffer::{ReadBuffer, WriteBuffer};
 use crate::capabilities::Capabilities;
 use crate::config::{Config, ServiceMethod};
@@ -181,6 +182,21 @@ pub struct PlsqlResult {
     pub implicit_results: ImplicitResults,
 }
 
+/// Session state returned by server-side piggyback messages.
+#[derive(Debug, Clone, Default)]
+pub struct SessionState {
+    /// Server session flags, when returned by the database.
+    pub flags: Option<u32>,
+    /// Server session ID, when returned by the database.
+    pub session_id: Option<u32>,
+    /// Server serial number, when returned by the database.
+    pub serial_number: Option<u16>,
+    /// Last logical transaction id returned by the database.
+    pub ltxid: Option<Vec<u8>>,
+    /// Session key/value state returned by sync/session-state piggybacks.
+    pub key_values: HashMap<String, Vec<u8>>,
+}
+
 impl PlsqlResult {
     /// Create an empty PL/SQL result
     pub fn empty() -> Self {
@@ -239,6 +255,15 @@ pub struct ServerInfo {
     pub protocol_version: u16,
     /// Whether server supports OOB (out of band) data
     pub supports_oob: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ParsedErrorInfo {
+    code: u32,
+    message: Option<String>,
+    cursor_id: u16,
+    row_count: u64,
+    batch_errors: Vec<BatchError>,
 }
 
 /// Stream type that can be either plain TCP or TLS-encrypted
@@ -867,6 +892,7 @@ impl ConnectionInner {
 /// via a connection pool).
 pub struct Connection {
     inner: Arc<Mutex<ConnectionInner>>,
+    session_state: StdMutex<SessionState>,
     config: Config,
     closed: AtomicBool,
     id: u32,
@@ -944,6 +970,7 @@ impl Connection {
 
         let conn = Connection {
             inner: Arc::new(Mutex::new(inner)),
+            session_state: StdMutex::new(SessionState::default()),
             config,
             closed: AtomicBool::new(false),
             id,
@@ -958,6 +985,14 @@ impl Connection {
     /// Get the connection ID
     pub fn id(&self) -> u32 {
         self.id
+    }
+
+    /// Get the latest session state returned by server piggyback messages.
+    pub fn session_state(&self) -> SessionState {
+        self.session_state
+            .lock()
+            .map(|state| state.clone())
+            .unwrap_or_default()
     }
 
     /// Check if the connection is closed
@@ -981,6 +1016,26 @@ impl Connection {
             }
         }
         result
+    }
+
+    fn record_session_key_value(&self, key: String, value: Vec<u8>) {
+        if let Ok(mut state) = self.session_state.lock() {
+            state.key_values.insert(key, value);
+        }
+    }
+
+    fn record_ltxid(&self, ltxid: Vec<u8>) {
+        if let Ok(mut state) = self.session_state.lock() {
+            state.ltxid = Some(ltxid);
+        }
+    }
+
+    fn record_session_identity(&self, flags: u32, session_id: u32, serial_number: u16) {
+        if let Ok(mut state) = self.session_state.lock() {
+            state.flags = Some(flags);
+            state.session_id = Some(session_id);
+            state.serial_number = Some(serial_number);
+        }
     }
 
     /// Get server information
@@ -1965,6 +2020,7 @@ impl Connection {
             payload,
             batch.rows.len(),
             batch.options.array_dml_row_counts,
+            batch.options.batch_errors,
         )
     }
 
@@ -1974,6 +2030,7 @@ impl Connection {
         payload: &[u8],
         batch_size: usize,
         want_row_counts: bool,
+        batch_errors_enabled: bool,
     ) -> Result<BatchResult> {
         if payload.len() < 3 {
             return Err(Error::Protocol("Batch response too short".to_string()));
@@ -1986,6 +2043,7 @@ impl Connection {
 
         let mut rows_affected: u64 = 0;
         let mut row_counts: Option<Vec<u64>> = None;
+        let mut batch_errors: Vec<BatchError> = Vec::new();
         let mut end_of_response = false;
 
         // Process messages until end_of_response or out of data
@@ -1995,13 +2053,16 @@ impl Connection {
             match msg_type {
                 // Error (4) - may contain error or success info
                 x if x == MessageType::Error as u8 => {
-                    let (error_code, error_msg, _cid, row_count) =
-                        self.parse_error_info_with_rowcount(&mut buf)?;
-                    rows_affected = row_count;
-                    if error_code != 0 && error_code != 1403 {
+                    let info = self.parse_error_info_detailed(&mut buf, true, true)?;
+                    rows_affected = info.row_count;
+                    batch_errors.extend(info.batch_errors);
+                    if info.code != 0
+                        && info.code != 1403
+                        && !(batch_errors_enabled && !batch_errors.is_empty())
+                    {
                         return Err(Error::OracleError {
-                            code: error_code,
-                            message: error_msg.unwrap_or_default(),
+                            code: info.code,
+                            message: info.message.unwrap_or_default(),
                         });
                     }
                 }
@@ -2047,7 +2108,9 @@ impl Connection {
 
         let mut result = BatchResult::new();
         result.total_rows_affected = rows_affected;
-        result.success_count = batch_size;
+        result.failure_count = batch_errors.len();
+        result.success_count = batch_size.saturating_sub(result.failure_count);
+        result.errors = batch_errors;
         result.row_counts = row_counts;
 
         Ok(result)
@@ -3305,9 +3368,33 @@ impl Connection {
 
                 // For collection OUT params, extract element type from the placeholder
                 if let Some(Value::Collection(ref placeholder)) = param.value {
+                    col.type_schema = placeholder
+                        .get("_type_schema")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
+                    col.type_name = placeholder
+                        .get("_type_name")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string);
                     if let Some(Value::Integer(elem_type_code)) = placeholder.get("_element_type") {
                         col.element_type =
                             crate::constants::OracleType::try_from(*elem_type_code as u8).ok();
+                    }
+                    if let Some(Value::Integer(collection_type_code)) =
+                        placeholder.get("_collection_type")
+                    {
+                        col.collection_type = match *collection_type_code as u8 {
+                            crate::constants::collection_type::PLSQL_INDEX_TABLE => {
+                                Some(crate::dbobject::CollectionType::PlsqlIndexTable)
+                            }
+                            crate::constants::collection_type::NESTED_TABLE => {
+                                Some(crate::dbobject::CollectionType::NestedTable)
+                            }
+                            crate::constants::collection_type::VARRAY => {
+                                Some(crate::dbobject::CollectionType::Varray)
+                            }
+                            _ => None,
+                        };
                     }
                 }
 
@@ -3386,13 +3473,21 @@ impl Connection {
         let num_pairs = buf.read_ub2()?;
         for _ in 0..num_pairs {
             let key_len = buf.read_ub2()?;
-            if key_len > 0 {
-                buf.read_string_with_length()?; // key text value
-            }
+            let key = if key_len > 0 {
+                buf.read_string_with_length()?
+            } else {
+                None
+            };
 
             let value_len = buf.read_ub2()?;
-            if value_len > 0 {
-                buf.skip_raw_bytes_chunked()?; // binary value
+            let value = if value_len > 0 {
+                Some(buf.read_raw_bytes_chunked()?)
+            } else {
+                None
+            };
+
+            if let (Some(key), Some(value)) = (key, value) {
+                self.record_session_key_value(key, value);
             }
 
             buf.skip_ub2()?; // keyword num
@@ -3481,7 +3576,9 @@ impl Connection {
             LTXID => {
                 let num_bytes = buf.read_ub4()?;
                 if num_bytes > 0 {
-                    buf.read_bytes_with_length()?;
+                    if let Some(ltxid) = buf.read_bytes_with_length()? {
+                        self.record_ltxid(ltxid);
+                    }
                 }
             }
             QUERY_CACHE_INVALIDATION | TRACE_EVENT => {}
@@ -3497,13 +3594,21 @@ impl Connection {
                 buf.skip(1)?; // length marker
                 for _ in 0..num_elements {
                     let key_len = buf.read_ub2()?;
-                    if key_len > 0 {
-                        buf.read_string_with_length()?;
-                    }
+                    let key = if key_len > 0 {
+                        buf.read_string_with_length()?
+                    } else {
+                        None
+                    };
 
                     let value_len = buf.read_ub2()?;
-                    if value_len > 0 {
-                        buf.read_bytes_with_length()?;
+                    let value = if value_len > 0 {
+                        buf.read_bytes_with_length()?
+                    } else {
+                        None
+                    };
+
+                    if let (Some(key), Some(value)) = (key, value) {
+                        self.record_session_key_value(key, value);
                     }
 
                     buf.skip_ub2()?; // keyword number
@@ -3533,21 +3638,31 @@ impl Connection {
                     buf.skip_ub1()?;
                     for _ in 0..num_elements {
                         let key_len = buf.read_ub2()?;
-                        if key_len > 0 {
-                            buf.skip_raw_bytes_chunked()?;
-                        }
+                        let key = if key_len > 0 {
+                            let bytes = buf.read_raw_bytes_chunked()?;
+                            Some(String::from_utf8_lossy(&bytes).to_string())
+                        } else {
+                            None
+                        };
 
                         let value_len = buf.read_ub2()?;
-                        if value_len > 0 {
-                            buf.skip_raw_bytes_chunked()?;
+                        let value = if value_len > 0 {
+                            Some(buf.read_raw_bytes_chunked()?)
+                        } else {
+                            None
+                        };
+
+                        if let (Some(key), Some(value)) = (key, value) {
+                            self.record_session_key_value(key, value);
                         }
 
                         buf.skip_ub2()?; // flags
                     }
                 }
-                buf.skip_ub4()?; // session flags
-                buf.skip_ub4()?; // session id
-                buf.skip_ub2()?; // serial number
+                let session_flags = buf.read_ub4()?;
+                let session_id = buf.read_ub4()?;
+                let serial_number = buf.read_ub2()?;
+                self.record_session_identity(session_flags, session_id, serial_number);
             }
             SESS_SIGNATURE => {
                 buf.skip_ub2()?; // number of DTYs
@@ -3827,9 +3942,7 @@ impl Connection {
                         .element_type
                         .unwrap_or(crate::constants::OracleType::Varchar);
 
-                    // Determine collection type from pickle flags
-                    // Collection flags are after header - but we'll default for now
-                    let collection_type = CollectionType::Varray;
+                    let collection_type = col.collection_type.unwrap_or(CollectionType::Varray);
 
                     let obj_type = DbObjectType::collection(
                         &col.type_schema.clone().unwrap_or_default(),
@@ -3967,112 +4080,135 @@ impl Connection {
         Ok(Value::Lob(LobValue::Empty))
     }
 
-    /// Parse error info message and extract cursor_id
-    /// Format per Python's _process_error_info in base.pyx
-    fn parse_error_info(&self, buf: &mut ReadBuffer) -> Result<(u32, Option<String>, u16)> {
+    fn parse_error_info_detailed(
+        &self,
+        buf: &mut ReadBuffer,
+        read_modern_tail: bool,
+        skip_modern_fields: bool,
+    ) -> Result<ParsedErrorInfo> {
         let packet_bytes = buf.as_bytes().clone();
-        // End of call status
-        let _call_status = buf.read_ub4()?;
-        // End to end seq#
-        buf.skip_ub2()?;
-        // Current row number
-        buf.skip_ub4()?;
-        // Error number (short form)
-        buf.skip_ub2()?;
-        // Array elem error
-        buf.skip_ub2()?;
-        // Array elem error
-        buf.skip_ub2()?;
-        // Cursor ID
+        let _call_status = buf.read_ub4()?; // end of call status
+        buf.skip_ub2()?; // end to end seq#
+        buf.skip_ub4()?; // current row number
+        buf.skip_ub2()?; // error number (short form)
+        buf.skip_ub2()?; // array elem error
+        buf.skip_ub2()?; // array elem error
         let cursor_id = buf.read_ub2()?;
-        // Error position
         let _error_pos = buf.read_sb2()?;
-        // SQL type (19c and earlier)
-        buf.skip_ub1()?;
-        // Fatal?
-        buf.skip_ub1()?;
-        // Flags
-        buf.skip_ub1()?;
-        // User cursor options
-        buf.skip_ub1()?;
-        // UPI parameter
-        buf.skip_ub1()?;
-        // Flags (second)
-        buf.skip_ub1()?;
-        // Rowid (rba, partition_id, skip 1, block_num, slot_num)
+        buf.skip_ub1()?; // SQL type
+        buf.skip_ub1()?; // fatal?
+        buf.skip_ub1()?; // flags
+        buf.skip_ub1()?; // user cursor options
+        buf.skip_ub1()?; // UPI parameter
+        buf.skip_ub1()?; // flags
         buf.skip_ub4()?; // rba
         buf.skip_ub2()?; // partition_id
         buf.skip_ub1()?; // skip
         buf.skip_ub4()?; // block_num
         buf.skip_ub2()?; // slot_num
-                         // OS error
-        buf.skip_ub4()?;
-        // Statement number
-        buf.skip_ub1()?;
-        // Call number
-        buf.skip_ub1()?;
-        // Padding
-        buf.skip_ub2()?;
-        // Success iters
-        buf.skip_ub4()?;
-        // oerrdd (logical rowid)
+        buf.skip_ub4()?; // OS error
+        buf.skip_ub1()?; // statement number
+        buf.skip_ub1()?; // call number
+        buf.skip_ub2()?; // padding
+        buf.skip_ub4()?; // success iters
+
         let oerrdd_len = buf.read_ub4()?;
         if oerrdd_len > 0 {
             buf.skip_raw_bytes_chunked()?;
         }
 
-        // Batch error codes array
-        let num_batch_errors = buf.read_ub2()?;
-        if num_batch_errors > 0 {
+        let num_batch_errors = buf.read_ub2()? as usize;
+        let mut batch_codes = Vec::with_capacity(num_batch_errors);
+        if num_batch_errors != 0 {
             buf.skip_ub1()?; // first byte
             for _ in 0..num_batch_errors {
-                buf.skip_ub2()?; // error code
+                batch_codes.push(buf.read_ub2()? as u32);
             }
         }
 
-        // Batch error row offset array
-        let num_offsets = buf.read_ub4()?;
-        if num_offsets > 0 {
+        let num_offsets = buf.read_ub4()? as usize;
+        let mut batch_offsets = Vec::with_capacity(num_offsets);
+        if num_offsets != 0 {
             buf.skip_ub1()?; // first byte
             for _ in 0..num_offsets {
-                buf.skip_ub4()?; // offset
+                batch_offsets.push(buf.read_ub4()? as usize);
             }
         }
 
-        // Batch error messages array
-        let num_batch_msgs = buf.read_ub2()?;
-        if num_batch_msgs > 0 {
+        let num_batch_msgs = buf.read_ub2()? as usize;
+        let mut batch_messages = Vec::with_capacity(num_batch_msgs);
+        if num_batch_msgs != 0 {
             buf.skip_ub1()?; // packed size
             for _ in 0..num_batch_msgs {
                 buf.skip_ub2()?; // chunk length
-                buf.read_string_with_length()?; // message
+                let message = buf
+                    .read_string_with_length()?
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                batch_messages.push(message);
                 buf.skip(2)?; // end marker
             }
         }
 
-        // Extended error number (UB4)
         let error_code = buf.read_ub4()?;
-        // Row count (UB8)
-        let _row_count = buf.read_ub8()?;
+        let row_count = if read_modern_tail { buf.read_ub8()? } else { 0 };
 
-        // Error message
+        if skip_modern_fields {
+            buf.skip_ub4()?; // sql_type
+            buf.skip_ub4()?; // server_checksum
+        }
+
         let error_msg = if error_code != 0 {
             buf.read_string_with_length()?.map(|s| s.trim().to_string())
         } else {
             None
         };
 
-        if error_code != 0
+        let (error_code, error_msg) = if error_code != 0
             && error_msg
                 .as_deref()
                 .is_none_or(|message| !message.contains("ORA-"))
         {
             if let Some((code, message)) = Self::extract_oracle_error_text(&packet_bytes) {
-                return Ok((code, Some(message), cursor_id));
+                (code, Some(message))
+            } else {
+                (error_code, error_msg)
             }
+        } else {
+            (error_code, error_msg)
+        };
+
+        let batch_len = batch_codes
+            .len()
+            .max(batch_offsets.len())
+            .max(batch_messages.len());
+        let mut batch_errors = Vec::with_capacity(batch_len);
+        for idx in 0..batch_len {
+            let code = batch_codes.get(idx).copied().unwrap_or(error_code);
+            let row_index = batch_offsets.get(idx).copied().unwrap_or(idx);
+            let message = batch_messages
+                .get(idx)
+                .cloned()
+                .filter(|msg| !msg.is_empty())
+                .or_else(|| error_msg.clone())
+                .unwrap_or_else(|| format!("ORA-{code:05}"));
+            batch_errors.push(BatchError::new(row_index, code, message));
         }
 
-        Ok((error_code, error_msg, cursor_id))
+        Ok(ParsedErrorInfo {
+            code: error_code,
+            message: error_msg,
+            cursor_id,
+            row_count,
+            batch_errors,
+        })
+    }
+
+    /// Parse error info message and extract cursor_id.
+    fn parse_error_info(&self, buf: &mut ReadBuffer) -> Result<(u32, Option<String>, u16)> {
+        let info = self.parse_error_info_detailed(buf, true, false)?;
+        Ok((info.code, info.message, info.cursor_id))
     }
 
     /// Parse error response packet (received after marker reset)
@@ -4091,98 +4227,12 @@ impl Connection {
 
         // Check for error message type (4)
         if msg_type == MessageType::Error as u8 {
-            // Parse error info per Python's _process_error_info
-            let _call_status = buf.read_ub4()?; // end of call status
-            buf.skip_ub2()?; // end to end seq#
-            buf.skip_ub4()?; // current row number
-            buf.skip_ub2()?; // error number (short form)
-            buf.skip_ub2()?; // array elem error
-            buf.skip_ub2()?; // array elem error
-            let _cursor_id = buf.read_ub2()?; // cursor id
-            let _error_pos = buf.read_sb2()?; // error position
-            buf.skip_ub1()?; // sql type (19c and earlier)
-            buf.skip_ub1()?; // fatal?
-            buf.skip_ub1()?; // flags
-            buf.skip_ub1()?; // user cursor options
-            buf.skip_ub1()?; // UPI parameter
-            buf.skip_ub1()?; // flags
-
-            // Rowid (rba, partition_id, skip 1, block_num, slot_num)
-            buf.skip_ub4()?; // rba
-            buf.skip_ub2()?; // partition_id
-            buf.skip_ub1()?; // skip
-            buf.skip_ub4()?; // block_num
-            buf.skip_ub2()?; // slot_num
-
-            buf.skip_ub4()?; // OS error
-            buf.skip_ub1()?; // statement number
-            buf.skip_ub1()?; // call number
-            buf.skip_ub2()?; // padding
-            buf.skip_ub4()?; // success iters
-
-            // oerrdd (logical rowid)
-            let oerrdd_len = buf.read_ub4()?;
-            if oerrdd_len > 0 {
-                buf.skip_raw_bytes_chunked()?;
-            }
-
-            // batch error codes array
-            let num_batch_errors = buf.read_ub2()?;
-            if num_batch_errors > 0 {
-                // Skip batch error data - we don't process it for now
-                buf.skip_ub1()?; // first byte
-                for _ in 0..num_batch_errors {
-                    buf.skip_ub2()?; // error code
-                }
-            }
-
-            // batch error row offset array
-            let num_offsets = buf.read_ub4()?;
-            if num_offsets > 0 {
-                buf.skip_ub1()?; // first byte
-                for _ in 0..num_offsets {
-                    buf.skip_ub4()?; // offset
-                }
-            }
-
-            // batch error messages array
-            let num_batch_msgs = buf.read_ub2()?;
-            if num_batch_msgs > 0 {
-                // Skip batch error messages
-                buf.skip_ub1()?; // packed size
-                for _ in 0..num_batch_msgs {
-                    buf.skip_ub2()?; // chunk length
-                    buf.read_string_with_length()?; // message
-                    buf.skip(2)?; // end marker
-                }
-            }
-
-            // Extended error number (UB4)
-            let error_num = buf.read_ub4()?;
-            let _row_count = buf.read_ub8()?; // row number (extended)
-
-            // Read error message
-            let error_msg = if error_num != 0 {
-                buf.read_string_with_length()?.map(|s| s.trim().to_string())
-            } else {
-                None
-            };
-
-            let (error_num, error_msg) = if error_num != 0
-                && error_msg
-                    .as_deref()
-                    .is_none_or(|message| !message.contains("ORA-"))
-            {
-                Self::extract_oracle_error_text(payload)
-                    .map(|(code, message)| (code, Some(message)))
-                    .unwrap_or((error_num, error_msg))
-            } else {
-                (error_num, error_msg)
-            };
-
+            let info = self.parse_error_info_detailed(&mut buf, true, false)?;
             return Err(Error::OracleError {
-                code: error_num,
-                message: error_msg.unwrap_or_else(|| format!("ORA-{:05}", error_num)),
+                code: info.code,
+                message: info
+                    .message
+                    .unwrap_or_else(|| format!("ORA-{:05}", info.code)),
             });
         }
 
@@ -4280,114 +4330,8 @@ impl Connection {
         &self,
         buf: &mut ReadBuffer,
     ) -> Result<(u32, Option<String>, u16, u64)> {
-        let packet_bytes = buf.as_bytes().clone();
-        // End of call status
-        let _call_status = buf.read_ub4()?;
-        // End to end seq#
-        buf.skip_ub2()?;
-        // Current row number
-        buf.skip_ub4()?;
-        // Error number (short form)
-        buf.skip_ub2()?;
-        // Array elem error
-        buf.skip_ub2()?;
-        // Array elem error
-        buf.skip_ub2()?;
-        // Cursor ID
-        let cursor_id = buf.read_ub2()?;
-        // Error position
-        let _error_pos = buf.read_sb2()?;
-        // SQL type (19c and earlier)
-        buf.skip_ub1()?;
-        // Fatal?
-        buf.skip_ub1()?;
-        // Flags
-        buf.skip_ub1()?;
-        // User cursor options
-        buf.skip_ub1()?;
-        // UPI parameter
-        buf.skip_ub1()?;
-        // Flags (second)
-        buf.skip_ub1()?;
-        // Rowid (rba, partition_id, skip 1, block_num, slot_num)
-        buf.skip_ub4()?; // rba
-        buf.skip_ub2()?; // partition_id
-        buf.skip_ub1()?; // skip
-        buf.skip_ub4()?; // block_num
-        buf.skip_ub2()?; // slot_num
-                         // OS error
-        buf.skip_ub4()?;
-        // Statement number
-        buf.skip_ub1()?;
-        // Call number
-        buf.skip_ub1()?;
-        // Padding
-        buf.skip_ub2()?;
-        // Success iters
-        buf.skip_ub4()?;
-        // oerrdd (logical rowid)
-        let oerrdd_len = buf.read_ub4()?;
-        if oerrdd_len > 0 {
-            buf.skip_raw_bytes_chunked()?;
-        }
-
-        // Batch error codes array
-        let num_batch_errors = buf.read_ub2()?;
-        if num_batch_errors > 0 {
-            buf.skip_ub1()?; // first byte
-            for _ in 0..num_batch_errors {
-                buf.skip_ub2()?; // error code
-            }
-        }
-
-        // Batch error row offset array
-        let num_offsets = buf.read_ub4()?;
-        if num_offsets > 0 {
-            buf.skip_ub1()?; // first byte
-            for _ in 0..num_offsets {
-                buf.skip_ub4()?; // offset
-            }
-        }
-
-        // Batch error messages array
-        let num_batch_msgs = buf.read_ub2()?;
-        if num_batch_msgs > 0 {
-            buf.skip_ub1()?; // packed size
-            for _ in 0..num_batch_msgs {
-                buf.skip_ub2()?; // chunk length
-                buf.read_string_with_length()?; // message
-                buf.skip(2)?; // end marker
-            }
-        }
-
-        // Extended error number (UB4)
-        let error_code = buf.read_ub4()?;
-        // Row count (UB8) - this is the rows affected!
-        let row_count = buf.read_ub8()?;
-
-        // Fields added in Oracle Database 20c (TTC field version >= 16)
-        // We always skip these since we support Oracle 20c+
-        buf.skip_ub4()?; // sql_type
-        buf.skip_ub4()?; // server_checksum
-
-        // Error message
-        let error_msg = if error_code != 0 {
-            buf.read_string_with_length()?.map(|s| s.trim().to_string())
-        } else {
-            None
-        };
-
-        if error_code != 0
-            && error_msg
-                .as_deref()
-                .is_none_or(|message| !message.contains("ORA-"))
-        {
-            if let Some((code, message)) = Self::extract_oracle_error_text(&packet_bytes) {
-                return Ok((code, Some(message), cursor_id, row_count));
-            }
-        }
-
-        Ok((error_code, error_msg, cursor_id, row_count))
+        let info = self.parse_error_info_detailed(buf, true, true)?;
+        Ok((info.code, info.message, info.cursor_id, info.row_count))
     }
 
     fn extract_oracle_error_text(data: &[u8]) -> Option<(u32, String)> {
@@ -4452,7 +4396,7 @@ impl Connection {
             let _oid = buf.read_bytes_with_length()?; // OID
             buf.skip_ub2()?; // version
             buf.skip_ub2()?; // charset_id
-            let _csfrm = buf.read_u8()?; // charset form
+            let csfrm = buf.read_u8()?; // charset form
             let max_size = buf.read_ub4()?;
 
             // For TTC field version >= 12.2 (8), skip oaccolid
@@ -4463,8 +4407,8 @@ impl Connection {
             let _nulls_allowed = buf.read_u8()?;
             buf.skip_ub1()?; // v7 length of name
             let name = buf.read_string_with_ub4_length()?.unwrap_or_default();
-            let _schema = buf.read_string_with_ub4_length()?; // schema
-            let _type_name = buf.read_string_with_ub4_length()?; // type_name
+            let schema = buf.read_string_with_ub4_length()?; // schema
+            let type_name = buf.read_string_with_ub4_length()?; // type_name
             buf.skip_ub2()?; // column position
             buf.skip_ub4()?; // uds_flags
 
@@ -4505,8 +4449,12 @@ impl Connection {
 
             let mut col = ColumnInfo::new(&name, oracle_type);
             col.data_size = if max_size > 0 { max_size } else { buffer_size };
+            col.buffer_size = buffer_size;
             col.precision = precision as i16;
             col.scale = scale as i16;
+            col.csfrm = csfrm;
+            col.type_schema = schema.filter(|value| !value.is_empty());
+            col.type_name = type_name.filter(|value| !value.is_empty());
             columns.push(col);
         }
 

@@ -472,4 +472,34 @@ FROM user_tables
 WHERE table_name IN ('TYPETEST1', 'TYPETEST2')
 ORDER BY table_name;
 
+
+PROMPT =========================================================
+PROMPT 14. Global temporary table behavior
+PROMPT =========================================================
+
+BEGIN
+  EXECUTE IMMEDIATE 'DROP TABLE nodb_gtt_temp PURGE';
+EXCEPTION
+  WHEN OTHERS THEN
+    IF SQLCODE != -942 THEN
+      DBMS_OUTPUT.PUT_LINE('drop nodb_gtt_temp ignored: ' || SQLERRM);
+    END IF;
+END;
+/
+
+CREATE GLOBAL TEMPORARY TABLE nodb_gtt_temp (
+  id NUMBER,
+  note VARCHAR2(30)
+) ON COMMIT DELETE ROWS;
+
+INSERT INTO nodb_gtt_temp VALUES (1, 'before commit');
+
+SELECT id, note FROM nodb_gtt_temp ORDER BY id;
+
+COMMIT;
+
+SELECT COUNT(*) AS count_after_commit FROM nodb_gtt_temp;
+
+DROP TABLE nodb_gtt_temp PURGE;
+
 PROMPT DONE

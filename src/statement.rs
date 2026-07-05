@@ -146,6 +146,20 @@ impl BindParam {
         if let Some(elem_type) = obj_type.element_type {
             placeholder.set("_element_type", Value::Integer(elem_type as i64));
         }
+        if let Some(collection_type) = obj_type.collection_type {
+            let wire_code = match collection_type {
+                crate::dbobject::CollectionType::PlsqlIndexTable => {
+                    crate::constants::collection_type::PLSQL_INDEX_TABLE
+                }
+                crate::dbobject::CollectionType::NestedTable => {
+                    crate::constants::collection_type::NESTED_TABLE
+                }
+                crate::dbobject::CollectionType::Varray => {
+                    crate::constants::collection_type::VARRAY
+                }
+            };
+            placeholder.set("_collection_type", Value::Integer(wire_code as i64));
+        }
         // Store the type OID for bind metadata
         if let Some(ref oid) = obj_type.oid {
             placeholder.set("_type_oid", Value::Bytes(oid.clone()));
@@ -349,6 +363,8 @@ pub struct ColumnInfo {
     pub vector_format: Option<u8>,
     /// Element type for collections (VARRAY, Nested Table)
     pub element_type: Option<OracleType>,
+    /// Collection type for object/collection columns and binds.
+    pub collection_type: Option<crate::dbobject::CollectionType>,
 }
 
 impl ColumnInfo {
@@ -372,6 +388,7 @@ impl ColumnInfo {
             vector_dimensions: None,
             vector_format: None,
             element_type: None,
+            collection_type: None,
         }
     }
 

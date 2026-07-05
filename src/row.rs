@@ -275,6 +275,18 @@ impl From<OracleVector> for Value {
     }
 }
 
+impl From<OracleIntervalYM> for Value {
+    fn from(v: OracleIntervalYM) -> Self {
+        Value::IntervalYM(v)
+    }
+}
+
+impl From<OracleIntervalDS> for Value {
+    fn from(v: OracleIntervalDS) -> Self {
+        Value::IntervalDS(v)
+    }
+}
+
 impl From<Vec<f32>> for Value {
     fn from(v: Vec<f32>) -> Self {
         Value::Vector(OracleVector::float32(v))
@@ -1035,6 +1047,7 @@ mod tests {
             vector_dimensions: None,
             vector_format: None,
             element_type: None,
+            collection_type: None,
         }
     }
 

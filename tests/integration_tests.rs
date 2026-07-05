@@ -403,6 +403,38 @@ mod data_type_tests {
 
     #[tokio::test]
     #[ignore = "requires Oracle database"]
+    async fn test_interval_input_binds_round_trip() {
+        use oracle_rs::types::{OracleIntervalDS, OracleIntervalYM};
+        use oracle_rs::Value;
+
+        let conn = connect().await.expect("Failed to connect");
+
+        let ym = OracleIntervalYM::new(10, 2);
+        let ds = OracleIntervalDS::new(11, 10, 9, 8, 555_000_000);
+
+        let result = conn
+            .query(
+                "SELECT :1 AS iym, :2 AS ids FROM dual",
+                &[ym.into(), ds.into()],
+            )
+            .await
+            .expect("INTERVAL bind query failed");
+
+        assert_eq!(result.row_count(), 1);
+        assert!(matches!(
+            result.rows[0].get(0),
+            Some(Value::IntervalYM(value)) if *value == ym
+        ));
+        assert!(matches!(
+            result.rows[0].get(1),
+            Some(Value::IntervalDS(value)) if *value == ds
+        ));
+
+        conn.close().await.expect("Failed to close");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Oracle database"]
     async fn test_timestamp_tz_and_ltz_are_decoded_as_server_utc_values() {
         use oracle_rs::Value;
 
@@ -2250,6 +2282,52 @@ mod batch_execution_tests {
         assert_eq!(counts[0], 1);
         assert_eq!(counts[1], 1);
         assert_eq!(counts[2], 1);
+
+        conn.rollback().await.expect("Failed to rollback");
+        conn.close().await.expect("Failed to close");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Oracle database"]
+    async fn test_batch_errors_are_structured() {
+        let conn = connect().await.expect("Failed to connect");
+
+        conn.execute(
+            "BEGIN EXECUTE IMMEDIATE 'CREATE TABLE batch_error_test (id NUMBER PRIMARY KEY, name VARCHAR2(30))'; EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;",
+            &[],
+        )
+        .await
+        .expect("Failed to create table");
+
+        conn.execute("DELETE FROM batch_error_test", &[]).await.ok();
+        conn.execute("INSERT INTO batch_error_test VALUES (1, 'existing')", &[])
+            .await
+            .expect("Failed to insert setup row");
+        conn.commit().await.expect("Failed to commit setup");
+
+        let batch = BatchBuilder::new("INSERT INTO batch_error_test (id, name) VALUES (:1, :2)")
+            .add_row(vec![2i64.into(), "ok".into()])
+            .add_row(vec![1i64.into(), "duplicate".into()])
+            .add_row(vec![3i64.into(), "also ok".into()])
+            .with_batch_errors()
+            .build();
+
+        let result = conn
+            .execute_batch(&batch)
+            .await
+            .expect("Batch errors mode should return a structured result");
+
+        assert!(result.has_errors(), "Expected batch errors");
+        assert_eq!(result.failure_count, 1);
+        assert_eq!(result.success_count, 2);
+        assert_eq!(result.errors[0].row_index, 1);
+        assert_eq!(result.errors[0].code, 1);
+        assert!(
+            result.errors[0].message.contains("ORA-00001")
+                || result.errors[0].message.contains("unique constraint"),
+            "unexpected batch error message: {}",
+            result.errors[0].message
+        );
 
         conn.rollback().await.expect("Failed to rollback");
         conn.close().await.expect("Failed to close");

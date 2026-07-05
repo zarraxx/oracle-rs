@@ -1,3 +1,4 @@
+use chrono::{Datelike, Timelike};
 use oracle_rs::{
     BindDirection, BindParam, Config, Connection, Error, OracleType, QueryResult, Value,
 };
@@ -25,6 +26,7 @@ struct SqlRs {
     feedback: bool,
     serveroutput: bool,
     continue_on_error: bool,
+    session_time_zone_offset_minutes: Option<i32>,
 }
 
 impl SqlRs {
@@ -36,6 +38,7 @@ impl SqlRs {
             feedback: true,
             serveroutput: false,
             continue_on_error: false,
+            session_time_zone_offset_minutes: None,
         }
     }
 
@@ -48,6 +51,7 @@ impl SqlRs {
     async fn run_script(&mut self, content: &str) -> Result<(), String> {
         let mut buffer = String::new();
         let mut block_mode = false;
+        let mut echo_line_no = 1usize;
 
         for raw_line in content.lines() {
             let line = raw_line.trim_end_matches('\r');
@@ -57,14 +61,22 @@ impl SqlRs {
                 if self.echo {
                     println!("SQL> ");
                 }
+                echo_line_no = 1;
                 continue;
             }
 
             if self.echo {
-                println!("SQL> {line}");
+                if buffer.is_empty() {
+                    println!("SQL> {line}");
+                    echo_line_no = 2;
+                } else {
+                    println!("{echo_line_no:>3}  {line}");
+                    echo_line_no += 1;
+                }
             }
 
             if buffer.is_empty() && self.handle_command(trimmed).await? {
+                echo_line_no = 1;
                 continue;
             }
 
@@ -73,6 +85,7 @@ impl SqlRs {
                 buffer.clear();
                 block_mode = false;
                 self.execute_statement(&sql).await?;
+                echo_line_no = 1;
                 continue;
             }
 
@@ -89,6 +102,7 @@ impl SqlRs {
                 let sql = strip_trailing_semicolon(buffer.trim()).to_string();
                 buffer.clear();
                 self.execute_statement(&sql).await?;
+                echo_line_no = 1;
             }
         }
 
@@ -305,7 +319,7 @@ impl SqlRs {
                 }
                 Ok(())
             }
-            Err(err) => self.handle_error(err),
+            Err(err) => self.handle_statement_error(&sql, err),
         }
     }
 
@@ -338,7 +352,7 @@ impl SqlRs {
 
         match result {
             Ok(Execution::Query(result)) => {
-                print_query_result(&result);
+                print_query_result(&result, self.session_time_zone_offset_minutes);
                 if self.feedback {
                     println!();
                     println!(
@@ -351,6 +365,7 @@ impl SqlRs {
                 Ok(())
             }
             Ok(Execution::Dml(result)) => {
+                self.update_session_display_state(sql);
                 if self.feedback {
                     println!();
                     println!("{}", feedback_for_statement(sql, result.rows_affected));
@@ -359,6 +374,7 @@ impl SqlRs {
                 Ok(())
             }
             Ok(Execution::Plsql) => {
+                self.update_session_display_state(sql);
                 self.drain_dbms_output().await?;
                 if self.feedback {
                     println!();
@@ -367,7 +383,7 @@ impl SqlRs {
                 }
                 Ok(())
             }
-            Err(err) => self.handle_error(err),
+            Err(err) => self.handle_statement_error(sql, err),
         }
     }
 
@@ -458,14 +474,23 @@ impl SqlRs {
             .collect()
     }
 
-    fn handle_error(&self, err: Error) -> Result<(), String> {
+    fn handle_statement_error(&self, sql: &str, err: Error) -> Result<(), String> {
         println!();
-        println!("{}", format_oracle_error(&err));
+        match &err {
+            Error::OracleError { .. } => print_sqlplus_error(sql, &err),
+            _ => println!("{}", sanitize_text(&err.to_string())),
+        }
         println!();
         if self.continue_on_error {
             Ok(())
         } else {
-            Err(err.to_string())
+            Err(String::new())
+        }
+    }
+
+    fn update_session_display_state(&mut self, sql: &str) {
+        if let Some(offset) = parse_alter_session_time_zone(sql) {
+            self.session_time_zone_offset_minutes = Some(offset);
         }
     }
 }
@@ -483,7 +508,9 @@ fn main() {
         .expect("failed to build tokio runtime");
 
     if let Err(err) = runtime.block_on(async_main()) {
-        eprintln!("{err}");
+        if !err.is_empty() {
+            eprintln!("{err}");
+        }
         std::process::exit(1);
     }
 }
@@ -612,7 +639,7 @@ fn env_or_default(name: &str, default_value: &str) -> String {
         .unwrap_or_else(|| default_value.to_string())
 }
 
-fn print_query_result(result: &QueryResult) {
+fn print_query_result(result: &QueryResult, session_time_zone_offset_minutes: Option<i32>) {
     if result.columns.is_empty() {
         for row in &result.rows {
             println!(
@@ -641,7 +668,11 @@ fn print_query_result(result: &QueryResult) {
                 .iter()
                 .enumerate()
                 .map(|(idx, value)| {
-                    let text = format_value(value);
+                    let text = format_cell(
+                        value,
+                        result.columns.get(idx).map(|col| col.oracle_type),
+                        session_time_zone_offset_minutes,
+                    );
                     if let Some(width) = widths.get_mut(idx) {
                         *width = (*width).max(text.len());
                     }
@@ -678,15 +709,133 @@ fn print_query_result(result: &QueryResult) {
 }
 
 fn format_value(value: &Value) -> String {
+    format_cell(value, None, None)
+}
+
+fn format_cell(
+    value: &Value,
+    oracle_type: Option<OracleType>,
+    session_time_zone_offset_minutes: Option<i32>,
+) -> String {
     match value {
-        Value::Null => String::new(),
+        Value::Null | Value::TypedNull(_) => String::new(),
         Value::String(s) => sanitize_text(s),
         Value::Bytes(bytes) => bytes_to_hex(bytes),
+        Value::Date(date) => format_sqlplus_date(
+            date.year,
+            date.month,
+            date.day,
+            date.hour,
+            date.minute,
+            date.second,
+        ),
+        Value::Timestamp(ts) => {
+            if oracle_type == Some(OracleType::TimestampLtz) {
+                if let Some(offset_minutes) = session_time_zone_offset_minutes {
+                    return format_timestamp_with_offset(ts, offset_minutes);
+                }
+            }
+            format_sqlplus_timestamp(
+                ts.year,
+                ts.month,
+                ts.day,
+                ts.hour,
+                ts.minute,
+                ts.second,
+                ts.microsecond,
+            )
+        }
         Value::Lob(lob) => match lob.as_locator() {
             Some(locator) => format!("<LOB {:?} size={}>", locator.oracle_type(), locator.size()),
             None => format!("<LOB size={:?}>", lob.size()),
         },
         _ => sanitize_text(&value.to_string()),
+    }
+}
+
+fn format_timestamp_with_offset(
+    ts: &oracle_rs::types::OracleTimestamp,
+    offset_minutes: i32,
+) -> String {
+    let Some(date) = chrono::NaiveDate::from_ymd_opt(ts.year, ts.month as u32, ts.day as u32)
+    else {
+        return format_sqlplus_timestamp(
+            ts.year,
+            ts.month,
+            ts.day,
+            ts.hour,
+            ts.minute,
+            ts.second,
+            ts.microsecond,
+        );
+    };
+    let Some(datetime) = date.and_hms_micro_opt(
+        ts.hour as u32,
+        ts.minute as u32,
+        ts.second as u32,
+        ts.microsecond,
+    ) else {
+        return format_sqlplus_timestamp(
+            ts.year,
+            ts.month,
+            ts.day,
+            ts.hour,
+            ts.minute,
+            ts.second,
+            ts.microsecond,
+        );
+    };
+    let adjusted = datetime + chrono::Duration::minutes(offset_minutes as i64);
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+        adjusted.year(),
+        adjusted.month(),
+        adjusted.day(),
+        adjusted.hour(),
+        adjusted.minute(),
+        adjusted.second(),
+        adjusted.nanosecond() / 1000
+    )
+}
+
+fn format_sqlplus_date(year: i32, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        display_year(year),
+        month,
+        day,
+        hour,
+        minute,
+        second
+    )
+}
+
+fn format_sqlplus_timestamp(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    microsecond: u32,
+) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}",
+        display_year(year),
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        microsecond
+    )
+}
+
+fn display_year(year: i32) -> i32 {
+    if year < 0 {
+        year.abs()
+    } else {
+        year
     }
 }
 
@@ -713,21 +862,147 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 
 fn feedback_for_statement(sql: &str, rows_affected: u64) -> String {
     let upper = sql.trim_start().to_ascii_uppercase();
-    if upper.starts_with("CREATE ") {
+    if upper.starts_with("CREATE MATERIALIZED VIEW") {
+        "Materialized view created.".to_string()
+    } else if upper.starts_with("CREATE GLOBAL TEMPORARY TABLE")
+        || upper.starts_with("CREATE TABLE")
+    {
+        "Table created.".to_string()
+    } else if upper.starts_with("CREATE VIEW") {
+        "View created.".to_string()
+    } else if upper.starts_with("CREATE OR REPLACE PROCEDURE")
+        || upper.starts_with("CREATE PROCEDURE")
+    {
+        "Procedure created.".to_string()
+    } else if upper.starts_with("CREATE OR REPLACE FUNCTION")
+        || upper.starts_with("CREATE FUNCTION")
+    {
+        "Function created.".to_string()
+    } else if upper.starts_with("CREATE OR REPLACE PACKAGE") || upper.starts_with("CREATE PACKAGE")
+    {
+        "Package created.".to_string()
+    } else if upper.starts_with("CREATE OR REPLACE TRIGGER") || upper.starts_with("CREATE TRIGGER")
+    {
+        "Trigger created.".to_string()
+    } else if upper.starts_with("CREATE ") {
         "Created.".to_string()
     } else if upper.starts_with("ALTER ") {
         "Session altered.".to_string()
+    } else if upper.starts_with("DROP TABLE") {
+        "Table dropped.".to_string()
+    } else if upper.starts_with("DROP VIEW") {
+        "View dropped.".to_string()
+    } else if upper.starts_with("DROP MATERIALIZED VIEW") {
+        "Materialized view dropped.".to_string()
+    } else if upper.starts_with("DROP PROCEDURE") {
+        "Procedure dropped.".to_string()
     } else if upper.starts_with("DROP ") {
         "Dropped.".to_string()
     } else if upper.starts_with("COMMIT") {
         "Commit complete.".to_string()
     } else if upper.starts_with("ROLLBACK") {
         "Rollback complete.".to_string()
+    } else if upper.starts_with("INSERT ") {
+        if rows_affected == 1 {
+            "1 row created.".to_string()
+        } else {
+            format!("{rows_affected} rows created.")
+        }
+    } else if upper.starts_with("UPDATE ") {
+        if rows_affected == 1 {
+            "1 row updated.".to_string()
+        } else {
+            format!("{rows_affected} rows updated.")
+        }
+    } else if upper.starts_with("DELETE ") {
+        if rows_affected == 1 {
+            "1 row deleted.".to_string()
+        } else {
+            format!("{rows_affected} rows deleted.")
+        }
     } else if rows_affected == 1 {
         "1 row affected.".to_string()
     } else {
         format!("{rows_affected} rows affected.")
     }
+}
+
+fn print_sqlplus_error(sql: &str, err: &Error) {
+    let message = format_oracle_error(err);
+    let first_line = sql.lines().next().unwrap_or(sql).trim_end();
+    println!("{first_line}");
+    println!(
+        "{}*",
+        " ".repeat(error_pointer_column(first_line, &message))
+    );
+    println!("ERROR at line 1:");
+    println!("{message}");
+}
+
+fn error_pointer_column(sql_line: &str, message: &str) -> usize {
+    if let Some(token) = quoted_oracle_identifier(message) {
+        if let Some(pos) = find_case_insensitive(sql_line, &token) {
+            return pos;
+        }
+    }
+    if message.contains("ORA-01476") {
+        if let Some(pos) = sql_line.find('/') {
+            return pos;
+        }
+    }
+    let upper = sql_line.to_ascii_uppercase();
+    if upper.starts_with("SELECT ") {
+        return "SELECT ".len();
+    }
+    sql_line.chars().take_while(|ch| ch.is_whitespace()).count()
+}
+
+fn quoted_oracle_identifier(message: &str) -> Option<String> {
+    let start = message.find('"')?;
+    let rest = &message[start + 1..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+fn find_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+    haystack
+        .to_ascii_uppercase()
+        .find(&needle.to_ascii_uppercase())
+}
+
+fn parse_alter_session_time_zone(sql: &str) -> Option<i32> {
+    let upper = sql.to_ascii_uppercase();
+    if !upper.starts_with("ALTER SESSION SET TIME_ZONE") {
+        return None;
+    }
+
+    let (_, value) = sql.split_once('=')?;
+    let value = strip_trailing_semicolon(value.trim())
+        .trim()
+        .trim_matches('\'');
+    parse_time_zone_offset(value)
+}
+
+fn parse_time_zone_offset(value: &str) -> Option<i32> {
+    if value.eq_ignore_ascii_case("UTC") || value == "+00:00" || value == "-00:00" {
+        return Some(0);
+    }
+    if value.eq_ignore_ascii_case("Asia/Kolkata") {
+        return Some(5 * 60 + 30);
+    }
+    parse_numeric_time_zone_offset(value)
+}
+
+fn parse_numeric_time_zone_offset(value: &str) -> Option<i32> {
+    let sign = match value.as_bytes().first().copied()? {
+        b'+' => 1,
+        b'-' => -1,
+        _ => return None,
+    };
+    let (hours, minutes) = value[1..].split_once(':')?;
+    let hours = hours.parse::<i32>().ok()?;
+    let minutes = minutes.parse::<i32>().ok()?;
+    Some(sign * (hours * 60 + minutes))
 }
 
 fn format_oracle_error(err: &Error) -> String {

@@ -203,6 +203,7 @@ fn parse_column_info(buf: &mut ReadBuffer, caps: &Capabilities) -> Result<Column
         vector_dimensions,
         vector_format,
         element_type: None, // For collections - will be filled later if needed
+        collection_type: None,
     })
 }
 

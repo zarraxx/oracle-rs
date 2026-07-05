@@ -23,7 +23,8 @@ pub use date::{
     encode_oracle_timestamp, OracleDate, OracleTimestamp,
 };
 pub use interval::{
-    decode_oracle_interval_ds, decode_oracle_interval_ym, OracleIntervalDS, OracleIntervalYM,
+    decode_oracle_interval_ds, decode_oracle_interval_ym, encode_oracle_interval_ds,
+    encode_oracle_interval_ym, OracleIntervalDS, OracleIntervalYM,
 };
 pub use lob::{LobData, LobLocator, LobValue};
 pub use number::{decode_oracle_number, encode_oracle_number, OracleNumber};

@@ -2141,6 +2141,9 @@ mod tests {
         // Data flags
         payload.extend_from_slice(&[0x00, 0x00]);
 
+        // Message type
+        payload.push(MessageType::DataTypes as u8);
+
         // A single data type followed by terminator
         payload.extend_from_slice(&1u16.to_be_bytes()); // data_type
         payload.extend_from_slice(&1u16.to_be_bytes()); // conv_data_type

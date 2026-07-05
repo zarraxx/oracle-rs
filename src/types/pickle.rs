@@ -337,6 +337,16 @@ fn decode_value(buf: &mut ReadBuffer, oracle_type: OracleType) -> Result<Value> 
             let ts = crate::types::decode_oracle_timestamp(&bytes)?;
             Ok(Value::Timestamp(ts))
         }
+        OracleType::IntervalYm => {
+            let bytes = buf.read_bytes_vec(len)?;
+            let interval = crate::types::decode_oracle_interval_ym(&bytes)?;
+            Ok(Value::IntervalYM(interval))
+        }
+        OracleType::IntervalDs => {
+            let bytes = buf.read_bytes_vec(len)?;
+            let interval = crate::types::decode_oracle_interval_ds(&bytes)?;
+            Ok(Value::IntervalDS(interval))
+        }
         _ => {
             // Unknown type - read as raw bytes
             let bytes = buf.read_bytes_vec(len)?;
@@ -413,10 +423,18 @@ fn encode_value(buf: &mut WriteBuffer, value: &Value, oracle_type: OracleType) -
             write_length(buf, bytes.len())?;
             buf.write_bytes(&bytes)?;
         }
+        Value::IntervalYM(interval) => {
+            let bytes = crate::types::encode_oracle_interval_ym(interval);
+            write_length(buf, bytes.len())?;
+            buf.write_bytes(&bytes)?;
+        }
+        Value::IntervalDS(interval) => {
+            let bytes = crate::types::encode_oracle_interval_ds(interval);
+            write_length(buf, bytes.len())?;
+            buf.write_bytes(&bytes)?;
+        }
         // Complex types not yet supported in collections
         Value::RowId(_)
-        | Value::IntervalYM(_)
-        | Value::IntervalDS(_)
         | Value::Lob(_)
         | Value::Json(_)
         | Value::Vector(_)

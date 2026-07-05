@@ -11,7 +11,7 @@ use crate::constants::{
     ccap_value, data_flags, exec_flags, exec_option, FunctionCode, MessageType, OracleType,
     PacketType, MAX_LONG_LENGTH, PACKET_HEADER_SIZE,
 };
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::row::Value;
 use crate::statement::Statement;
 
@@ -767,8 +767,8 @@ impl<'a> ExecuteMessage<'a> {
                 (OracleType::Cursor, 0, 0, 0)
             }
             Value::Collection(_) => {
-                // Collection (VARRAY, Nested Table) - bound as Object type
-                // TODO: Full implementation requires type descriptor with OID
+                // Collection (VARRAY, Nested Table) - bound as Object type.
+                // Type OID is written later from the DbObject metadata when available.
                 (OracleType::Object, 0, 0, 0)
             }
         }
@@ -776,7 +776,10 @@ impl<'a> ExecuteMessage<'a> {
 
     /// Write a single bind value
     fn write_bind_value(&self, buf: &mut WriteBuffer, value: &Value) -> Result<()> {
-        use crate::types::{encode_binary_double, encode_oracle_number};
+        use crate::types::{
+            encode_binary_double, encode_oracle_interval_ds, encode_oracle_interval_ym,
+            encode_oracle_number,
+        };
 
         match value {
             Value::Null | Value::TypedNull(_) => {
@@ -843,10 +846,15 @@ impl<'a> ExecuteMessage<'a> {
                 buf.write_u8(bytes.len() as u8)?;
                 buf.write_bytes(&bytes)?;
             }
-            Value::IntervalYM(_) | Value::IntervalDS(_) => {
-                return Err(Error::Protocol(
-                    "INTERVAL input binds are not implemented yet".to_string(),
-                ));
+            Value::IntervalYM(interval) => {
+                let encoded = encode_oracle_interval_ym(interval);
+                buf.write_u8(encoded.len() as u8)?;
+                buf.write_bytes(&encoded)?;
+            }
+            Value::IntervalDS(interval) => {
+                let encoded = encode_oracle_interval_ds(interval);
+                buf.write_u8(encoded.len() as u8)?;
+                buf.write_bytes(&encoded)?;
             }
             Value::RowId(r) => {
                 // Write ROWID as string
